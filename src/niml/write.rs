@@ -43,9 +43,15 @@ fn write_element(element: &NimlElement, out: &mut String) {
     for (key, value) in &attrs {
         out.push_str("\n  ");
         out.push_str(key);
-        out.push_str("=\"");
-        out.push_str(&escape(value));
-        out.push('"');
+        // An empty value is written as a bare name, which AFNI reads back as
+        // a NULL right-hand side. Writing `key=""` would not round-trip:
+        // SUMA's SUMA_IS_EMPTY_STR_ATTR treats NULL (and "~") as empty but ""
+        // as a real value (suma_datasets.h).
+        if !value.is_empty() {
+            out.push_str("=\"");
+            out.push_str(&escape(value));
+            out.push('"');
+        }
     }
     out.push_str(" >");
 

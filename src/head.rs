@@ -267,24 +267,61 @@ impl Header {
             .unwrap_or_else(|| vec![0.0; self.nvals()])
     }
 
-    /// Per-sub-brick labels (`BRICK_LABS`, `~`-separated on disk).
+    /// The `BRICK_TYPES` code for sub-brick `p`, following AFNI's loader
+    /// (`THD_init_datablock_brick` in `thd_initdblk.c`): a missing or empty
+    /// attribute means short (code 1) for every sub-brick, and a list shorter
+    /// than `nvals` repeats its last entry.
+    pub fn brick_type_code(&self, p: usize) -> i64 {
+        match self.ints("BRICK_TYPES") {
+            Some(codes) if !codes.is_empty() => {
+                codes.get(p).copied().unwrap_or(codes[codes.len() - 1])
+            }
+            _ => 1,
+        }
+    }
+
+    /// The `BRICK_FLOAT_FACS` scale factor for sub-brick `p`, or `0.0`
+    /// (unscaled) when the attribute is missing or too short, as in
+    /// `thd_initdblk.c`. AFNI multiplies by any non-zero factor, including a
+    /// negative one.
+    pub fn brick_factor(&self, p: usize) -> f64 {
+        self.floats("BRICK_FLOAT_FACS")
+            .and_then(|facs| facs.get(p).copied())
+            .unwrap_or(0.0)
+    }
+
+    /// Per-sub-brick labels from `BRICK_LABS`, one per sub-brick.
+    ///
+    /// On disk the labels are `~`-separated; once parsed, the `~` are NULs
+    /// (see the module docs). As in `thd_initdblk.c`, label *p* is the *p*-th
+    /// field, and a missing or empty field gets AFNI's default `#p`. (AFNI
+    /// also truncates labels to 64 characters; they are kept whole here.)
     pub fn brick_labels(&self) -> Vec<String> {
-        self.string("BRICK_LABS")
-            .map(|s| {
-                s.split('~')
-                    .map(str::to_string)
-                    .filter(|p| !p.is_empty())
-                    .collect()
+        let mut fields = self
+            .get("BRICK_LABS")
+            .and_then(|value| match value {
+                AttributeValue::String(s) => Some(s.split('\0')),
+                _ => None,
             })
-            .unwrap_or_default()
+            .into_iter()
+            .flatten();
+        (0..self.nvals())
+            .map(|p| match fields.next() {
+                Some(label) if !label.is_empty() => label.to_string(),
+                _ => format!("#{p}"),
+            })
+            .collect()
     }
 
     /// Whether the `.BRIK` data is little-endian, from `BYTEORDER_STRING`.
-    /// Defaults to the host byte order when the attribute is absent.
+    ///
+    /// As in `thd_initdblk.c`, only the leading `LSB_FIRST` / `MSB_FIRST` is
+    /// compared, and a missing or unrecognised value falls back to the host
+    /// byte order (AFNI's legacy behaviour, with a warning there).
     pub fn brik_is_little_endian(&self) -> bool {
         match self.string("BYTEORDER_STRING") {
-            Some(s) if s.eq_ignore_ascii_case("LSB_FIRST") => true,
-            Some(s) if s.eq_ignore_ascii_case("MSB_FIRST") => false,
+            Some(s) if s.starts_with("LSB_FIRST") => true,
+            Some(s) if s.starts_with("MSB_FIRST") => false,
             _ => cfg!(target_endian = "little"),
         }
     }
@@ -392,6 +429,18 @@ fn encode_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brick_labels_keep_positions_and_default_like_afni() {
+        let mut h = Header::default();
+        h.set("DATASET_RANK", AttributeValue::Int(vec![3, 4]));
+        // On disk: 'a~~c~  ->  fields "a", "", "c", then nothing for #3.
+        h.set("BRICK_LABS", AttributeValue::String(decode_string("a~~c~")));
+        assert_eq!(h.brick_labels(), ["a", "#1", "c", "#3"]);
+        h.attributes.clear();
+        h.set("DATASET_RANK", AttributeValue::Int(vec![3, 2]));
+        assert_eq!(h.brick_labels(), ["#0", "#1"]);
+    }
 
     const SAMPLE: &str = "\ntype = integer-attribute\nname = DATASET_RANK\ncount = 2\n 3 6\n\ntype = integer-attribute\nname = DATASET_DIMENSIONS\ncount = 3\n 64 64 30\n\ntype = float-attribute\nname = DELTA\ncount = 3\n 3.0 3.0 4.0\n\ntype = float-attribute\nname = ORIGIN\ncount = 3\n -90.0 -126.0 -72.0\n\ntype = string-attribute\nname = TYPESTRING\ncount = 15\n'3DIM_HEAD_ANAT~\n\ntype = integer-attribute\nname = BRICK_TYPES\ncount = 6\n1 1 1 1 1 1\n";
 

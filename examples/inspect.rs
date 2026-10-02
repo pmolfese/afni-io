@@ -42,10 +42,13 @@ fn inspect(path: &Path) -> Result<()> {
                 roi.unique_nodes().len()
             );
         }
-    } else if name.ends_with(".head") || name.ends_with(".brik") || name.ends_with(".brik.gz") {
+    } else if AfniPaths::is_afni_name(path) {
         let brik = Brik::read(path)?;
         let [nx, ny, nz] = brik.dimensions;
         println!("HEAD/BRIK  {nx}x{ny}x{nz} x {} sub-bricks", brik.nvals());
+        for (p, sub) in brik.sub_bricks.iter().flatten().enumerate() {
+            println!("  [{p}] {:?}, factor {}", sub.brik_type(), sub.factor);
+        }
         if let Some(ts) = brik.header.typestring() {
             println!("  typestring: {ts}");
         }

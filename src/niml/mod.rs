@@ -463,6 +463,16 @@ mod tests {
     }
 
     #[test]
+    fn valueless_attributes_round_trip_as_bare_names() {
+        let text = "<AFNI_dataset ni_form=\"ni_group\" domain_parent_idcode label=\"x\" >\n</AFNI_dataset>";
+        let elements = parse_str(text).unwrap();
+        assert_eq!(elements[0].attrs["domain_parent_idcode"], "");
+        let written = serialize(&elements);
+        assert!(written.contains("\n  domain_parent_idcode\n"), "{written}");
+        assert_eq!(parse_str(&written).unwrap(), elements);
+    }
+
+    #[test]
     fn escapes_round_trip() {
         let elements =
             parse_str(r#"<AFNI_atr atr_name="NOTE" >hello &lt;world&gt;</AFNI_atr>"#).unwrap();

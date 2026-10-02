@@ -456,15 +456,26 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Parse the attribute portion of an element header into a map.
+///
+/// Follows `parse_header_stuff` in AFNI's `niml/niml_header.c`:
+///
+/// * an attribute may have no `=value` at all (e.g. `ConvertDset` writes a
+///   bare `domain_parent_idcode`); AFNI stores a NULL right-hand side and this
+///   map stores an empty string;
+/// * a value may be double-quoted, single-quoted, or an unquoted run of
+///   non-blank characters other than `<`, `>`, `/` and `=`.
 pub(super) fn parse_attrs(header: &str) -> Result<BTreeMap<String, String>> {
     let mut attrs = BTreeMap::new();
     let bytes = header.as_bytes();
     let mut pos = 0;
-
-    while pos < bytes.len() {
-        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
-            pos += 1;
+    let skip_blanks = |pos: &mut usize| {
+        while bytes.get(*pos).is_some_and(u8::is_ascii_whitespace) {
+            *pos += 1;
         }
+    };
+
+    loop {
+        skip_blanks(&mut pos);
         if pos >= bytes.len() {
             break;
         }
@@ -472,38 +483,52 @@ pub(super) fn parse_attrs(header: &str) -> Result<BTreeMap<String, String>> {
         while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() && bytes[pos] != b'=' {
             pos += 1;
         }
-        let key = header[key_start..pos].trim();
+        let key = &header[key_start..pos];
         if key.is_empty() {
             return Err(Error::parse("NIML attribute has empty name"));
         }
-        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
-            pos += 1;
-        }
+        skip_blanks(&mut pos);
         if bytes.get(pos) != Some(&b'=') {
-            return Err(Error::parse(format!("NIML attribute {key} is missing '='")));
+            // No right-hand side.
+            attrs.insert(key.to_string(), String::new());
+            continue;
         }
         pos += 1;
-        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
-            pos += 1;
-        }
-        if bytes.get(pos) != Some(&b'"') {
-            return Err(Error::parse(format!(
-                "NIML attribute {key} value is not quoted"
-            )));
-        }
-        pos += 1;
-        let value_start = pos;
-        while pos < bytes.len() && bytes[pos] != b'"' {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            return Err(Error::parse(format!(
-                "NIML attribute {key} has no closing quote"
-            )));
-        }
-        let value = unescape(&header[value_start..pos]);
-        pos += 1;
-        attrs.insert(key.to_string(), value);
+        skip_blanks(&mut pos);
+        let value = match bytes.get(pos) {
+            Some(&quote @ (b'"' | b'\'')) => {
+                pos += 1;
+                let value_start = pos;
+                while pos < bytes.len() && bytes[pos] != quote {
+                    pos += 1;
+                }
+                if pos >= bytes.len() {
+                    return Err(Error::parse(format!(
+                        "NIML attribute {key} has no closing quote"
+                    )));
+                }
+                let value = &header[value_start..pos];
+                pos += 1;
+                value
+            }
+            Some(_) => {
+                let value_start = pos;
+                while pos < bytes.len()
+                    && !bytes[pos].is_ascii_whitespace()
+                    && !matches!(bytes[pos], b'<' | b'>' | b'/' | b'=')
+                {
+                    pos += 1;
+                }
+                if pos == value_start {
+                    return Err(Error::parse(format!(
+                        "NIML attribute {key} has an empty value"
+                    )));
+                }
+                &header[value_start..pos]
+            }
+            None => return Err(Error::parse(format!("NIML attribute {key} ends after '='"))),
+        };
+        attrs.insert(key.to_string(), unescape(value));
     }
     Ok(attrs)
 }
@@ -511,6 +536,23 @@ pub(super) fn parse_attrs(header: &str) -> Result<BTreeMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attributes_follow_afni_header_grammar() {
+        let attrs = parse_attrs(
+            "dset_type=\"Node_Bucket\"\n  domain_parent_idcode\n  geometry_parent_idcode \
+             single='a b' bare=12.5 spaced = \"x\" escaped=\"&lt;&quot;\"",
+        )
+        .unwrap();
+        assert_eq!(attrs["dset_type"], "Node_Bucket");
+        assert_eq!(attrs["domain_parent_idcode"], "");
+        assert_eq!(attrs["geometry_parent_idcode"], "");
+        assert_eq!(attrs["single"], "a b");
+        assert_eq!(attrs["bare"], "12.5");
+        assert_eq!(attrs["spaced"], "x");
+        assert_eq!(attrs["escaped"], "<\"");
+        assert!(parse_attrs("open=\"never closed").is_err());
+    }
 
     #[test]
     fn binary_little_endian_matrix() {

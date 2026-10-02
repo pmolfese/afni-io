@@ -2,7 +2,7 @@
 //! checked against AFNI's own text dumps of the same files.
 //!
 //! Tests marked `#[ignore = "Phase N: ..."]` are known gaps from the roadmap in
-//! `UPDATE_AFNI_CRATE.md`. Run them with `cargo test -- --ignored`; un-ignore
+//! `afni-io_ROADMAP.md`. Run them with `cargo test -- --ignored`; un-ignore
 //! each one as its phase lands.
 
 mod common;
@@ -70,9 +70,46 @@ fn nifti_values_match_source_dataset_dump() {
 }
 
 #[test]
-#[ignore = "Phase 1: BRICK_TYPES 6 (rgb) is rejected"]
-fn brik_rgb_loads() {
-    Brik::read(common::data("volume/rgb+orig.HEAD")).unwrap();
+fn brick_labels_match_3dinfo() {
+    // `3dinfo -label`: "Tstat#0|Fstat*with*tildes" and "#0|#0".
+    let stat = Header::read(common::data("volume/stat+orig.HEAD")).unwrap();
+    assert_eq!(stat.brick_labels(), ["Tstat#0", "Fstat*with*tildes"]);
+    let mixed = Header::read(common::data("volume/mixed+orig.HEAD")).unwrap();
+    assert_eq!(mixed.brick_labels(), ["#0", "#0"]);
+}
+
+#[test]
+fn brik_rgb_keeps_channels() {
+    // make_volume_fixtures.sh: r = 60i, g = 50j, b = 40k.
+    let brik = Brik::read(common::data("volume/rgb+orig.HEAD")).unwrap();
+    let sub = brik.sub_brick(0).unwrap();
+    let BrickData::Rgb(rgb) = &sub.data else {
+        panic!("expected RGB, got {:?}", sub.brik_type());
+    };
+    for (k, j, i) in (0..6).flat_map(|k| (0..5).flat_map(move |j| (0..4).map(move |i| (k, j, i)))) {
+        let index = brik.voxel_index(i, j, k).unwrap();
+        assert_eq!(
+            rgb[index],
+            [60 * i as u8, 50 * j as u8, 40 * k as u8],
+            "({i},{j},{k})"
+        );
+    }
+    assert_eq!(brik.value(1, 1, 1, 0), None, "RGB has no scalar value");
+}
+
+#[test]
+fn brik_every_spelling_and_sub_brick_selection() {
+    let full = Brik::read(common::data("volume/s16+orig.HEAD")).unwrap();
+    let base = common::data("volume/s16+orig.HEAD").display().to_string();
+    let base = base.trim_end_matches(".HEAD");
+    for name in [format!("{base}.BRIK"), base.to_string(), format!("{base}.")] {
+        let brik = Brik::read(&name).unwrap();
+        assert_eq!(brik.sub_bricks, full.sub_bricks, "{name}");
+    }
+    let gz = common::data("volume/s16gz+orig.BRIK.gz");
+    let only_last = Brik::read_sub_bricks(&gz, &[2]).unwrap();
+    assert!(only_last.sub_brick(0).is_none());
+    assert_eq!(only_last.sub_brick(2), full.sub_brick(2));
 }
 
 #[test]
@@ -132,10 +169,19 @@ fn stat_niml_dset_matches_convertdset_dump() {
 }
 
 #[test]
-#[ignore = "Phase 1: valueless NIML attributes (e.g. `domain_parent_idcode`) fail to parse"]
-fn convertdset_niml_dsets_load() {
+fn convertdset_niml_dsets_match_their_dumps() {
+    // ConvertDset writes valueless attributes (`domain_parent_idcode`).
     for name in ["dense_asc", "dense_bi", "sparse_asc", "sparse_bi"] {
-        NimlDataset::read(common::data(&format!("surface/{name}.niml.dset"))).unwrap();
+        let dset = NimlDataset::read(common::data(&format!("surface/{name}.niml.dset"))).unwrap();
+        let rows = common::read_numeric_dump(&format!("surface/{name}.niml.dset.dump.txt"));
+        assert_eq!(rows.len(), dset.rows(), "{name}");
+        for (r, row) in rows.iter().enumerate() {
+            let node = dset.node_indices.as_ref().map_or(r as u32, |idx| idx[r]);
+            assert_eq!(node as f64, row[0], "{name} row {r}");
+            for c in 0..dset.columns() {
+                assert_eq!(dset.data.get(r, c).unwrap(), row[c + 1], "{name} [{r},{c}]");
+            }
+        }
     }
 }
 

@@ -59,7 +59,7 @@ pub use error::{Error, Result};
 /// Re-exports of the most commonly used types.
 pub mod prelude {
     pub use crate::array::{DataType, TypedArray};
-    pub use crate::brik::{Brik, BrikType};
+    pub use crate::brik::{AfniPaths, BrickData, Brik, BrikType, SubBrick};
     pub use crate::dset::NimlDataset;
     pub use crate::error::{Error, Result};
     pub use crate::gifti::{DataArray, Gifti};

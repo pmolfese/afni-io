@@ -93,7 +93,6 @@ fn synthetic_gii_dsets_match_convertdset_dump() {
 }
 
 #[test]
-#[ignore = "Phase 1: ConvertDset's valueless `domain_parent_idcode` attribute fails to parse"]
 fn synthetic_gii_dsets_match_niml_dset() {
     let niml = common::data("surface/dense_asc.niml.dset");
     for encoding in ["asc", "b64", "b64gz"] {

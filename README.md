@@ -24,12 +24,15 @@ code); the only dependencies are
 | `nifti` | NIfTI-1 / NIfTI-2 volumes | `.nii`, `.nii.gz`, `.hdr`/`.img` | ✅ | ✅ |
 | `onedee` | Numeric text tables | `.1D` | ✅ | ✅ |
 
-An AFNI volume is one dataset stored as a `.HEAD`/`.BRIK` pair; `Brik::read`
-takes any member (`.HEAD`, `.BRIK`, or `.BRIK.gz`), finds its sibling, and
-decompresses a gzipped `.BRIK.gz` automatically. Binary NIML
-(`binary.lsbfirst` / `binary.msbfirst`) and the AFNI BRIK datum types `byte`,
-`short`, `float`, and `complex` are handled, including per sub-brick scale
-factors and byte order.
+An AFNI volume is one dataset stored as a `.HEAD`/`.BRIK` pair. `Brik::read`
+accepts any name AFNI does (`.HEAD`, `.BRIK`, `.BRIK.gz`, or `prefix+orig`,
+`+acpc`, `+tlrc` with or without a trailing `.`), and `AfniPaths` exposes that
+lookup on its own. All eight AFNI datum types are read (byte, short, int,
+float, double, complex, rgb, rgba), including datasets that mix them. Each
+sub-brick keeps its stored type and scale factor, and has scaled `f32`
+accessors. `Brik::read_sub_bricks` loads only the sub-bricks you ask for, and
+`.BRIK.gz` is decompressed as it streams. Binary NIML (`binary.lsbfirst` /
+`binary.msbfirst`) is also read.
 
 **NIfTI**: both the 348-byte NIfTI-1 and 540-byte NIfTI-2 headers, automatic
 byte-order detection, `scl_slope`/`scl_inter` scaling, and the qform/sform
@@ -104,4 +107,7 @@ regenerate them are described in [`tests/data/README.md`](tests/data/README.md).
 
 ## License
 
-MIT OR Apache-2.0
+Public domain. afni-io is a United States Government work (17 U.S.C. § 105).
+Outside the US, rights are waived under
+[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/). See
+[`LICENSE`](LICENSE).

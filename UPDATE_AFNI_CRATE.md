@@ -191,29 +191,6 @@ AFNI reader and the `nifti` / `gifti-rs` dependencies, then start the
 
 ## Roadmap
 
-This brief covers Phases 1–4. The later phases are listed so the design leaves
-room for them.
-
-| # | Phase | Brief task |
-|---|-------|-----------|
-| 0 | Repo, name (`afni-io`), fixtures, test harness ✅ | — |
-| 1 | HEAD/BRIK reader: all datums, typed storage, path lookup, overflow checks, reading only requested sub-bricks, streaming gunzip | 1 |
-| 2 | Geometry: affine, oblique flag, view type, TAXIS | 2 |
-| 3 | Shared `StatKind`; `BRICK_STATAUX`/`STATSYM`; `AFNI_atr` ↔ `Header` converter; NIfTI ecode-4 extension | 3, 4 |
-| 4 | BRIK writing, housekeeping, optional `read_any()`; then move sumaru's volume code onto the crate | 5, 6 |
-| 5 | NIML core: binary write, variable-length binary records, incremental parsing, valueless attributes; decide f64 vs typed matrix storage | — |
-| 6 | `.niml.dset`/ROI parity with sumaru, reusing `StatKind` and the converter | — |
-| 7 | GIfTI swap in sumaru (intent code maps to `StatKind`), drop `gifti-rs` | — |
-| 8 | spec, binary FreeSurfer surfaces, `.stc`, `.niml.tract`, Graph_Bucket | — |
-| 9 | AFNI talk protocol encoding (behind a `talk` feature) | — |
-| 10 | FreeSurfer annot/curv/MGH, `.1D.dset` and selectors, PLY/SureFit/BYU/… surfaces, GIfTI ExternalFileBinary | — |
-
-Found while building the Phase 0 fixtures:
-
-- **Valueless NIML attributes** (`domain_parent_idcode` with no `=`, written by
-  `ConvertDset`) break `niml::parse`. AFNI (`niml_header.c`) and sumaru
-  (`io/niml.rs`) both accept them. It's a small fix and blocks reading
-  real AFNI dsets, so do it early in Phase 1 even though it belongs to Phase 5.
-- **SUMA's GIfTI writer negates x and y** compared with `.asc`/`.1D.coord`,
-  while declaring `NIFTI_XFORM_UNKNOWN`. Pin down the convention (RAI internally,
-  RAS in GIfTI?) in Phase 2 and document it in `gifti`/`surface`.
+Phase status and the discovery log are kept in `afni-io_ROADMAP.md`. This
+brief covers Phases 1–4. Update the roadmap as items finish, and add to the
+log anything that affects the design.
