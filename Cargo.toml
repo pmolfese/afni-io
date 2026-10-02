@@ -1,0 +1,19 @@
+[package]
+name = "afni-io"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Native Rust readers and writers for AFNI/SUMA file formats (HEAD/BRIK, NIML datasets, ROIs, surfaces, spec, and 1D files)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pmolfese/afni-io"
+keywords = ["afni", "suma", "neuroimaging", "niml", "brik"]
+categories = ["science", "parser-implementations"]
+
+[dependencies]
+thiserror = "2"
+# gzip/zlib/deflate for `.nii.gz` and GIfTI GZipBase64Binary payloads.
+# Its default backend (miniz_oxide) is pure Rust.
+flate2 = "1"
+
+[lints.rust]
+unsafe_code = "forbid"

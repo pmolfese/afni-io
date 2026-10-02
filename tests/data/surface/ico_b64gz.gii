@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE GIFTI SYSTEM "http://gifti.projects.nitrc.org/gifti.dtd">
+<GIFTI Version="1.0"  NumberOfDataArrays="2">
+   <MetaData>
+      <MD>
+         <Name><![CDATA[gifticlib-version]]></Name>
+         <Value><![CDATA[gifti library version 1.17, 19 Feb, 2021]]></Value>
+      </MD>
+   </MetaData>
+   <LabelTable/>
+   <DataArray Intent="NIFTI_INTENT_POINTSET"
+              DataType="NIFTI_TYPE_FLOAT32"
+              ArrayIndexingOrder="RowMajorOrder"
+              Dimensionality="2"
+              Dim0="42"
+              Dim1="3"
+              Encoding="GZipBase64Binary"
+              Endian="LittleEndian"
+              ExternalFileName=""
+              ExternalFileOffset="">
+      <MetaData>
+         <MD>
+            <Name><![CDATA[AnatomicalStructurePrimary]]></Name>
+            <Value><![CDATA[Unknown]]></Value>
+         </MD>
+         <MD>
+            <Name><![CDATA[AnatomicalStructureSecondary]]></Name>
+            <Value><![CDATA[Unknown]]></Value>
+         </MD>
+         <MD>
+            <Name><![CDATA[GeometricType]]></Name>
+            <Value><![CDATA[Unknown]]></Value>
+         </MD>
+         <MD>
+            <Name><![CDATA[UniqueID]]></Name>
+            <Value><![CDATA[AFN_iS0C4mD4mQHQp6JKnjllrQ]]></Value>
+         </MD>
+         <MD>
+            <Name><![CDATA[date]]></Name>
+            <Value><![CDATA[Fri Oct  2 16:39:42 2026]]></Value>
+         </MD>
+      </MetaData>
+      <CoordinateSystemTransformMatrix>
+         <DataSpace><![CDATA[NIFTI_XFORM_UNKNOWN]]></DataSpace>
+         <TransformedSpace><![CDATA[NIFTI_XFORM_UNKNOWN]]></TransformedSpace>
+         <MatrixData>
+            1.000000 0.000000 0.000000 0.000000 
+            0.000000 1.000000 0.000000 0.000000 
+            0.000000 0.000000 1.000000 0.000000 
+            0.000000 0.000000 0.000000 1.000000 
+         </MatrixData>
+      </CoordinateSystemTransformMatrix>
+      <Data>eJxdkbERgCAMRdM6hq1bkJKSCRzFXezcAkZwAGaR3BF4UnAkP/yXACJy1fjmtB9FZqw9DktcfG+aoC5gCBgCLllrj9G7xhTOeytpf7Jpk5my620Fz9tS0yy38+7pZwaLftdZQ52+AK/Sj14KpmI2BUsx56/OnmQ42+5Olr/bonP2DD7nGn9s3g+YsLWb</Data>
+   </DataArray>
+   <DataArray Intent="NIFTI_INTENT_TRIANGLE"
+              DataType="NIFTI_TYPE_INT32"
+              ArrayIndexingOrder="RowMajorOrder"
+              Dimensionality="2"
+              Dim0="80"
+              Dim1="3"
+              Encoding="GZipBase64Binary"
+              Endian="LittleEndian"
+              ExternalFileName=""
+              ExternalFileOffset="">
+      <MetaData>
+         <MD>
+            <Name><![CDATA[TopologicalType]]></Name>
+            <Value><![CDATA[Unknown]]></Value>
+         </MD>
+         <MD>
+            <Name><![CDATA[UniqueID]]></Name>
+            <Value><![CDATA[AFN_rpNiwaPWCPhHLweaPHWNDA]]></Value>
+         </MD>
+         <MD>
+            <Name><![CDATA[date]]></Name>
+            <Value><![CDATA[Fri Oct  2 16:39:42 2026]]></Value>
+         </MD>
+      </MetaData>
+      <Data>eJxNkgluwkAQBInxsQcxwSRAgHCEy/z/g8yKGqkttdRVatlrafvJ+5lZPi299Fa4xs3Yzy1fsPdaOOLm7BeWAfYehae4Bful5Rv2PhXOuCX7cs4f2HsWbnFry4dlxf+spdfCLW7FfmP5hb23wgG3Yb+17GDvQbjCbdnvLX+w90o44fbsyzkPsPckXON2vOdoOcHeg3CHO7I/W/5h751wgzuzL2e7wN4b4YQ7cLZyN66w9yQccTfecxH2HoUT7jF535NyN+6w904440b2D/5nlN4Id7iB/ci3B+lRuMGVO1fuSbkbT9h7Fg64E9+6C3sPwhn3AhAQE+0=</Data>
+   </DataArray>
+</GIFTI>

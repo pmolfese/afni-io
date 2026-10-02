@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE GIFTI SYSTEM "http://gifti.projects.nitrc.org/gifti.dtd">
+<GIFTI Version="1.0"  NumberOfDataArrays="3">
+   <MetaData>
+      <MD>
+         <Name><![CDATA[UniqueID]]></Name>
+         <Value><![CDATA[AFN_0RofEelQ5vxwpCr0IxbFeg]]></Value>
+      </MD>
+      <MD>
+         <Name><![CDATA[AFNI_History]]></Name>
+         <Value><![CDATA[[afni-io Fri Oct  2 16:39:43 2026] ConvertDset -i _sparse.1D -node_index_1d _sparse_idx.1D -o_gii_b64gz -prefix sparse_b64gz.gii.dset]]></Value>
+      </MD>
+      <MD>
+         <Name><![CDATA[gifticlib-version]]></Name>
+         <Value><![CDATA[gifti library version 1.17, 19 Feb, 2021]]></Value>
+      </MD>
+   </MetaData>
+   <LabelTable/>
+   <DataArray Intent="NIFTI_INTENT_NODE_INDEX"
+              DataType="NIFTI_TYPE_INT32"
+              ArrayIndexingOrder="RowMajorOrder"
+              Dimensionality="1"
+              Dim0="11"
+              Encoding="GZipBase64Binary"
+              Endian="LittleEndian"
+              ExternalFileName=""
+              ExternalFileOffset="">
+      <MetaData/>
+      <Data>eJxjYGBgYAFiDiDmAWIBIBYBYgkglgFiBSBWAWINIAYADewA3Q==</Data>
+   </DataArray>
+   <DataArray Intent="NIFTI_INTENT_NONE"
+              DataType="NIFTI_TYPE_FLOAT32"
+              ArrayIndexingOrder="RowMajorOrder"
+              Dimensionality="1"
+              Dim0="11"
+              Encoding="GZipBase64Binary"
+              Endian="LittleEndian"
+              ExternalFileName=""
+              ExternalFileOffset="">
+      <MetaData>
+         <MD>
+            <Name><![CDATA[Name]]></Name>
+            <Value><![CDATA[numeric]]></Value>
+         </MD>
+      </MetaData>
+      <Data>eJxjYACBBnsg4QBEQNwAxAuA+AAQPwBiBkcGBgEgVnAEAH82BjM=</Data>
+   </DataArray>
+   <DataArray Intent="NIFTI_INTENT_NONE"
+              DataType="NIFTI_TYPE_FLOAT32"
+              ArrayIndexingOrder="RowMajorOrder"
+              Dimensionality="1"
+              Dim0="11"
+              Encoding="GZipBase64Binary"
+              Endian="LittleEndian"
+              ExternalFileName=""
+              ExternalFileOffset="">
+      <MetaData>
+         <MD>
+            <Name><![CDATA[Name]]></Name>
+            <Value><![CDATA[numeric]]></Value>
+         </MD>
+      </MetaData>
+      <Data>eJxjYGiwZ2BgcAAiIG4A4gVAfACIHwAxgyMDgwAQKwCxgSMAmJ8GpA==</Data>
+   </DataArray>
+</GIFTI>

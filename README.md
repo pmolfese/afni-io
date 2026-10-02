@@ -1,4 +1,4 @@
-# afni
+# afni-io
 
 Native Rust readers and writers for the file formats used by
 [AFNI](https://afni.nimh.nih.gov/) and its surface viewer **SUMA**.
@@ -43,7 +43,7 @@ label tables. Writing emits ASCII or Base64.
 ## Example
 
 ```rust
-use afni::prelude::*;
+use afni_io::prelude::*;
 
 // Surface dataset
 let dset = NimlDataset::read("lh.thickness.niml.dset")?;
@@ -61,14 +61,14 @@ for roi in NodeRoi::read_all("V1.niml.roi")? {
 
 // GIfTI surface (any encoding)
 let gii = Gifti::read("rh.white.gii")?;
-let mesh = gii.to_surface()?; // -> afni::surface::Surface
+let mesh = gii.to_surface()?; // -> afni_io::surface::Surface
 println!("{} vertices, {} faces", mesh.n_vertices(), mesh.n_faces());
 
 // NIfTI volume (.nii / .nii.gz / .hdr+.img)
 let vol = Nifti::read("epi.nii.gz")?;
 println!("shape {:?}, affine {:?}", vol.shape(), vol.header.affine());
 let intensity = vol.voxel(32, 32, 12, 0); // scaled value at a voxel
-# Ok::<(), afni::Error>(())
+# Ok::<(), afni_io::Error>(())
 ```
 
 A small CLI that dispatches on extension lives in `examples/inspect.rs`:
@@ -89,6 +89,18 @@ Format details were cross-checked against AFNI's C source, its MATLAB readers
 implementation, and the NIfTI-1/NIfTI-2 and GIfTI 1.0 specifications. The
 readers are validated against real-world fixtures (nibabel's GIfTI test files
 in ASCII/Base64/GZipBase64 form and `example4d.nii.gz`).
+
+## Testing
+
+```sh
+cargo test                  # unit tests + committed fixtures
+cargo test -- --ignored     # known gaps, each labelled with its roadmap phase
+AFNI_IO_REFERENCE_DIR=../sumaru/testing cargo test   # also large/private files
+```
+
+The integration tests check the readers against AFNI's own output for the same
+files (`3dmaskdump`, `3dinfo`, `ConvertDset`). The fixtures and the scripts that
+regenerate them are described in [`tests/data/README.md`](tests/data/README.md).
 
 ## License
 

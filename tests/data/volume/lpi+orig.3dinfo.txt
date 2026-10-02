@@ -1,0 +1,27 @@
+
+Dataset File:    lpi+orig
+Identifier Code: AFN_6tXI02v3ojTOp9y3BmWuLg  Creation Date: Fri Oct  2 16:37:46 2026
+Template Space:  ORIG
+Dataset Type:    Func-Bucket (-fbuc)
+Byte Order:      LSB_FIRST [this CPU native = LSB_FIRST]
+Storage Mode:    BRIK
+Storage Space:   720 (720) bytes
+Geometry String: "MATRIX(-1.5,0,0,12.5,0,-2,0,-7,0,0,2.5,-3):4,5,6"
+Data Axes Tilt:  Plumb
+Data Axes Orientation:
+  first  (x) = Left-to-Right
+  second (y) = Posterior-to-Anterior
+  third  (z) = Inferior-to-Superior   [-orient LPI]
+R-to-L extent:     8.000 [L] -to-    12.500 [L] -step-     1.500 mm [  4 voxels]
+A-to-P extent:   -15.000 [A] -to-    -7.000 [A] -step-     2.000 mm [  5 voxels]
+I-to-S extent:    -3.000 [I] -to-     9.500 [S] -step-     2.500 mm [  6 voxels]
+Number of time steps = 3  Time step = 1.00000none  Origin = 0.00000none
+  -- At sub-brick #0 '#0' datum type is short:         -300 to           243
+  -- At sub-brick #1 '#1' datum type is short:          700 to          1243
+  -- At sub-brick #2 '#2' datum type is short:         1700 to          2243
+
+----- HISTORY -----
+[afni-io@: Fri Oct  2 16:37:45 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,3 -expr 'i+10*j+100*k+1000*t-300' -datum short -prefix s16
+[afni-io: Fri Oct  2 16:37:46 2026] {AFNI_26.2.08:macos_13_ARM} 3dresample -orient LPI -prefix lpi -input s16+orig
+[afni-io: Fri Oct  2 16:37:46 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -xorigin 12.5 -yorigin -7 -zorigin 3 -xdel 1.5 -ydel 2 -zdel 2.5 lpi+orig
+

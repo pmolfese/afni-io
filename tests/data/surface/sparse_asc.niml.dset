@@ -1,0 +1,86 @@
+<AFNI_dataset
+  dset_type="Node_Bucket"
+  self_idcode="AFN_FFfvfWJBMM72cLB63uNC3Q"
+  domain_parent_idcode
+  geometry_parent_idcode
+  filename="sparse_asc.niml.dset"
+  label="sparse_asc.niml.dset"
+  ni_form="ni_group" >
+<SPARSE_DATA
+  ni_type="2*float"
+  ni_dimen="11"
+  data_type="Node_Bucket_data" >
+ 0 1
+ 1 2
+ 2 3
+ 3 4
+ 4 5
+ 5 6
+ 6 7
+ 7 8
+ 8 9
+ 9 10
+ 10 11
+</SPARSE_DATA>
+
+<INDEX_LIST
+  ni_type="int"
+  ni_dimen="11"
+  data_type="Node_Bucket_node_indices"
+  sorted_node_def="Yes"
+  COLMS_RANGE="0 40 0 10"
+  COLMS_LABS="Node Index"
+  COLMS_TYPE="Node_Index" >
+ 0
+ 4
+ 8
+ 12
+ 16
+ 20
+ 24
+ 28
+ 32
+ 36
+ 40
+</INDEX_LIST>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_RANGE"
+  alloc_max="8240" >
+ "0.000000 10.000000 0 10;1.000000 11.000000 0 10"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_LABS"
+  alloc_max="8208" >
+ "numeric;numeric"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_TYPE"
+  alloc_max="8220" >
+ "Generic_Float;Generic_Float"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_STATSYM"
+  alloc_max="8202" >
+ "none;none"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="HISTORY_NOTE" >
+ "[afni-io Fri Oct  2 16:39:43 2026] ConvertDset -i _sparse.1D -node_index_1d _sparse_idx.1D -o_niml_asc -prefix sparse_asc.niml.dset"
+</AFNI_atr>
+
+</AFNI_dataset>

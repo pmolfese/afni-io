@@ -1,0 +1,148 @@
+<AFNI_dataset
+  dset_type="Node_Bucket"
+  self_idcode="AFN_Fls6gI2fUo651Ub0fCgk2w"
+  domain_parent_idcode
+  geometry_parent_idcode
+  filename="dense_asc.niml.dset"
+  label="dense_asc.niml.dset"
+  ni_form="ni_group" >
+<SPARSE_DATA
+  ni_type="3*float"
+  ni_dimen="42"
+  data_type="Node_Bucket_data" >
+ 0 100 200
+ 1 101 201
+ 2 102 202
+ 3 103 203
+ 4 104 204
+ 5 105 205
+ 6 106 206
+ 7 107 207
+ 8 108 208
+ 9 109 209
+ 10 110 210
+ 11 111 211
+ 12 112 212
+ 13 113 213
+ 14 114 214
+ 15 115 215
+ 16 116 216
+ 17 117 217
+ 18 118 218
+ 19 119 219
+ 20 120 220
+ 21 121 221
+ 22 122 222
+ 23 123 223
+ 24 124 224
+ 25 125 225
+ 26 126 226
+ 27 127 227
+ 28 128 228
+ 29 129 229
+ 30 130 230
+ 31 131 231
+ 32 132 232
+ 33 133 233
+ 34 134 234
+ 35 135 235
+ 36 136 236
+ 37 137 237
+ 38 138 238
+ 39 139 239
+ 40 140 240
+ 41 141 241
+</SPARSE_DATA>
+
+<INDEX_LIST
+  ni_type="int"
+  ni_dimen="42"
+  data_type="Node_Bucket_node_indices"
+  sorted_node_def="Yes"
+  COLMS_RANGE="0 41 0 41"
+  COLMS_LABS="Node Index (inferred)"
+  COLMS_TYPE="Node_Index" >
+ 0
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+ 16
+ 17
+ 18
+ 19
+ 20
+ 21
+ 22
+ 23
+ 24
+ 25
+ 26
+ 27
+ 28
+ 29
+ 30
+ 31
+ 32
+ 33
+ 34
+ 35
+ 36
+ 37
+ 38
+ 39
+ 40
+ 41
+</INDEX_LIST>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_RANGE"
+  alloc_max="8243" >
+ "0.000000 41.000000 0 41;100.000000 141.000000 0 41;200.000000 241.000000 0 41"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_LABS"
+  alloc_max="8208" >
+ "numeric;numeric;numeric"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_TYPE"
+  alloc_max="8220" >
+ "Generic_Float;Generic_Float;Generic_Float"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_STATSYM"
+  alloc_max="8202" >
+ "none;none;none"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="HISTORY_NOTE" >
+ "[afni-io Fri Oct  2 16:39:42 2026] ConvertDset -i _dense.1D -add_node_index -o_niml_asc -prefix dense_asc.niml.dset"
+</AFNI_atr>
+
+</AFNI_dataset>

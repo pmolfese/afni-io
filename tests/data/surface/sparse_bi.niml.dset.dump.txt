@@ -1,0 +1,18 @@
+# <SPARSE_DATA
+#  ni_type = "int,2*float"
+#  ni_dimen = "11"
+#  data_type = "Node_Bucket_data"
+# >
+ 0 0 1
+ 4 1 2
+ 8 2 3
+ 12 3 4
+ 16 4 5
+ 20 5 6
+ 24 6 7
+ 28 7 8
+ 32 8 9
+ 36 9 10
+ 40 10 11
+# </SPARSE_DATA>
+

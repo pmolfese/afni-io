@@ -1,0 +1,23 @@
+
+Dataset File:    rgb+orig
+Identifier Code: AFN_PWAP-FM358XEGoJ6hGwIZw  Creation Date: Fri Oct  2 16:37:46 2026
+Template Space:  ORIG
+Dataset Type:    Intensity (-fim)
+Byte Order:      LSB_FIRST [this CPU native = LSB_FIRST]
+Storage Mode:    BRIK
+Storage Space:   360 (360) bytes
+Geometry String: "MATRIX(1,0,0,0,0,1,0,0,0,0,1,0):4,5,6"
+Data Axes Tilt:  Plumb
+Data Axes Orientation:
+  first  (x) = Right-to-Left
+  second (y) = Anterior-to-Posterior
+  third  (z) = Inferior-to-Superior   [-orient RAI]
+R-to-L extent:     0.000     -to-     3.000 [L] -step-     1.000 mm [  4 voxels]
+A-to-P extent:     0.000     -to-     4.000 [P] -step-     1.000 mm [  5 voxels]
+I-to-S extent:     0.000     -to-     5.000 [S] -step-     1.000 mm [  6 voxels]
+Number of values stored at each pixel = 1
+  -- At sub-brick #0 '#0' datum type is rgb:            0 to        194.02
+
+----- HISTORY -----
+[afni-io@: Fri Oct  2 16:37:46 2026] {AFNI_26.2.08:macos_13_ARM} 3dThreetoRGB -prefix rgb _r+orig _g+orig _b+orig
+
