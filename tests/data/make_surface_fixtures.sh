@@ -60,6 +60,8 @@ done
 ConvertDset -i _stat.1D -add_node_index -o_niml_asc -prefix stat.niml.dset >/dev/null 2>&1
 3drefit -substatpar 0 fitt 10 -substatpar 1 fift 2 30 \
         -sublabel 0 'T#0' -sublabel 1 'F#1' stat.niml.dset >/dev/null 2>&1
+# The same statistics as GIfTI: Intent codes plus intent_p1..3 metadata.
+ConvertDset -i stat.niml.dset -o_gii_asc -prefix stat.gii.dset >/dev/null 2>&1
 rm -f _*.1D
 # Node coordinates as SUMA reports them.
 SurfaceMetrics -i ico.asc -coords -prefix ico_ref >/dev/null 2>&1 || true

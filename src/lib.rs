@@ -52,6 +52,7 @@ pub mod niml;
 pub mod onedee;
 pub mod roi;
 pub mod spec;
+pub mod stat;
 pub mod surface;
 mod xml;
 
@@ -71,5 +72,6 @@ pub mod prelude {
     pub use crate::onedee::OneD;
     pub use crate::roi::{NodeRoi, RoiDatum};
     pub use crate::spec::{Spec, SpecSurface};
+    pub use crate::stat::{StatKind, StatSpec, ThresholdCurve};
     pub use crate::surface::Surface;
 }

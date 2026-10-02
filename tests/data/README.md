@@ -66,7 +66,8 @@ All of it comes from `CreateIcosahedron -ld 2` (42 nodes, 80 triangles).
 - **Specs:** `ico.spec`, written by `CreateIcosahedron`, and `ico_states.spec`,
   two states from `quickspec`, one non-anatomical with a `LocalDomainParent`.
 - **Datasets:** `dense_*` (42 rows), `sparse_*` (11 rows, nodes 0, 4, …, 40) and
-  `stat.niml.dset` (`Ttest(10)`, `Ftest(2,30)`). Each is written as NIML ASCII
+  `stat.niml.dset` (`Ttest(10)`, `Ftest(2,30)`), also converted to
+  `stat.gii.dset` (`NIFTI_INTENT_TTEST`/`FTEST` with `intent_p1..2` metadata). Each is written as NIML ASCII
   (`_asc`), NIML binary (`_bi`) and GIfTI ASCII/B64/B64GZ.
 - **References:** `*.dump.txt` holds `ConvertDset -o_1D_stdout` output with the
   node index as the first column. `ico_ref.coord.1D.dset` holds `SurfaceMetrics -coords`.

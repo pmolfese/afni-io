@@ -400,13 +400,50 @@ pub(crate) fn escape(text: &str) -> String {
         .replace('<', "&lt;")
 }
 
-/// Reverse of [`escape`].
+/// Reverse of [`escape`], in one pass, following `unescape_inplace` in
+/// `niml/niml_util.c`: the five named entities plus the numeric forms
+/// `&#ddd;` and `&#xhh;`. Anything else is copied unchanged.
 pub(crate) fn unescape(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let entity = rest.find(';').map(|end| (&rest[1..end], end));
+        let decoded = entity.and_then(|(name, end)| {
+            let ch = match name {
+                "lt" => '<',
+                "gt" => '>',
+                "quot" => '"',
+                "apos" => '\'',
+                "amp" => '&',
+                _ => {
+                    let code = if let Some(hex) = name.strip_prefix("#x") {
+                        u32::from_str_radix(hex, 16).ok()?
+                    } else {
+                        name.strip_prefix('#')?.parse().ok()?
+                    };
+                    char::from_u32(code)?
+                }
+            };
+            Some((ch, end))
+        });
+        match decoded {
+            Some((ch, end)) => {
+                out.push(ch);
+                rest = &rest[end + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Format an `f64` compactly, trimming trailing zeros but keeping it a float.
@@ -480,5 +517,42 @@ mod tests {
             panic!("expected text");
         };
         assert_eq!(text, "hello <world>");
+    }
+
+    #[test]
+    fn unescape_handles_numeric_entities_in_one_pass() {
+        assert_eq!(unescape("a&#x0a;b&#32;c"), "a\nb c");
+        assert_eq!(unescape("&amp;lt; &lt; &bogus; & x"), "&lt; < &bogus; & x");
+    }
+
+    #[test]
+    fn string_columns_are_split_before_unescaping_and_quoted_on_write() {
+        // One quoted string holding an escaped quote, spaces and a newline.
+        let text = "<AFNI_atr ni_type=\"String\" ni_dimen=\"1\" atr_name=\"HISTORY_NOTE\" >\n \"say &quot;hi&quot; to a&#x0a;b\"\n</AFNI_atr>";
+        let elements = parse_str(text).unwrap();
+        assert_eq!(
+            elements[0].data,
+            NimlData::Text("say \"hi\" to a\nb".into())
+        );
+        let written = serialize(&elements);
+        assert!(
+            written.contains("\"say &quot;hi&quot; to a\nb\""),
+            "{written}"
+        );
+        assert_eq!(parse_str(&written).unwrap(), elements);
+
+        // Several strings in one column (AFNI splits long attributes this way).
+        let text =
+            "<AFNI_atr ni_type=\"String\" ni_dimen=\"2\" >\"part one \" 'part two'</AFNI_atr>";
+        let NimlData::Mixed(table) = &parse_str(text).unwrap()[0].data else {
+            panic!("expected one row per string");
+        };
+        assert_eq!(
+            table.values,
+            [
+                NimlValue::Text("part one ".into()),
+                NimlValue::Text("part two".into())
+            ]
+        );
     }
 }

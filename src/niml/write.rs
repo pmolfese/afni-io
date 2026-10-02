@@ -94,8 +94,21 @@ fn write_element(element: &NimlElement, out: &mut String) {
             out.push('\n');
         }
         NimlData::Text(text) => {
+            // A String/CString body must be quoted: AFNI reads an unquoted
+            // string only up to the first blank. Other text (e.g. ROI datum
+            // records) is written as is.
+            let quoted = matches!(
+                attrs.get("ni_type").map(String::as_str),
+                Some("String" | "CString")
+            );
             out.push('\n');
+            if quoted {
+                out.push('"');
+            }
             out.push_str(&escape(text));
+            if quoted {
+                out.push('"');
+            }
             out.push('\n');
         }
         NimlData::None => {}

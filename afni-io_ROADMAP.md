@@ -14,7 +14,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 | 0 | Setup: repo, name, license, fixtures, test harness | ✅ |
 | 1 | HEAD/BRIK reader parity | ✅ |
 | 2 | Geometry | ✅ |
-| 3 | Stat metadata and the NIfTI AFNI extension | ⬜ |
+| 3 | Stat metadata and the NIfTI AFNI extension | ✅ |
 | 4 | BRIK writing, housekeeping, sumaru volume swap | ⬜ |
 | 5 | NIML core parity | ⬜ |
 | 6 | `.niml.dset` / ROI parity | ⬜ |
@@ -78,15 +78,29 @@ Brief task 2. New `geometry` module, plus methods on `head::Header`.
 
 No breaking API changes; only additions.
 
-## Phase 3 — Stat metadata and the NIfTI AFNI extension ⬜
+## Phase 3 — Stat metadata and the NIfTI AFNI extension ✅
 
 Brief tasks 3–4.
 
-- [x] `BRICK_LABS` parsing, done in Phase 1 (labels were being glued together, see log)
-- [ ] One shared `StatKind` type, filled the same way from HEAD `BRICK_STATAUX`/`STATSYM`, the NIfTI extension, NIML `COLMS_STATSYM` and GIfTI intent codes
-- [ ] Converter between `AFNI_atr` elements and `head::Header` (port of `THD_dblkatr_from_niml`)
-- [ ] NIfTI extension list; `Nifti::afni_header()` for ecode 4; keep other extensions as raw bytes
-- [ ] p-value math stays out of this crate; it goes to `afni-core`
+- [x] `BRICK_LABS` parsing (done in Phase 1)
+- [x] New `stat` module: `StatKind` (the 23 AFNI stat codes, which are NIfTI intent codes 2–24), `StatSpec { kind, params }`, `parse_statsym_list`, and `ThresholdCurve` for `FDRCURVE_*`/`MDFCURVE_*`. Parsing ports `NI_stat_decode`, formatting ports `NI_stat_encode`/`NI_fval_to_char`, so output matches AFNI's text exactly
+- [x] One type for all four sources: `Header::brick_stats()` (STATSYM, else STATAUX), the NIfTI AFNI extension (same `Header`), NIML `COLMS_STATSYM` (`parse_statsym_list`), and GIfTI (`DataArray::stat()`, from `Intent` + `intent_p1..3`). Tests check `Ttest(10);Ftest(2,30)` comes out identical from `.niml.dset` and `.gii.dset`
+- [x] `Header::from_niml` / `Header::to_niml`: a port of `THD_dblkatr_from_niml`, plus the reverse
+- [x] `Nifti::extensions` (raw `(code, bytes)`, unknown ones kept), read for single-file and `.hdr`, and written back (esize padded to 16, `vox_offset` updated). `Nifti::afni_header()` and `Nifti::set_afni_header()`
+- [x] Test: every attribute in `stat.nii`'s extension equals `stat+orig.HEAD`, except the ID code `3dAFNItoNIFTI` regenerates
+- [x] Checked against AFNI: a `.nii` whose extension was edited by afni-io reads in `3dinfo`/`3dAttribute` with the new labels and statcodes (`fizt`, `fitt` dof 5.5)
+- [x] p-value math kept out (it goes to `afni-core`)
+- [x] `examples/inspect.rs` prints per-sub-brick labels and statistics for `.HEAD` and for a NIfTI's AFNI extension
+
+Fixed along the way (NIML strings; needed for the extension, pulled forward from Phase 5):
+- [x] Reading: a `String` body is split into strings *before* entities are decoded, so `&quot;` no longer ends a string early. A single string has its quotes removed; several become a one-column table
+- [x] Writing: `String`/`CString` bodies are now quoted. Without quotes AFNI reads only up to the first blank (confirmed with `3dinfo -label`)
+- [x] Entity decoding is a single pass and handles `&#ddd;` / `&#xhh;`, as `unescape_inplace` does
+
+Public API changes:
+- `Nifti` has a new `extensions` field.
+- `NimlData::Text` for a `String` element no longer includes its surrounding quotes.
+- A `String` element with several strings parses as `NimlData::Mixed`.
 
 ## Phase 4 — BRIK writing, housekeeping, sumaru volume swap ⬜
 
@@ -102,6 +116,7 @@ Brief tasks 5–6.
 - [ ] Binary NIML writer
 - [ ] Variable-length records (`SUMA_NIML_ROI_DATUM`, `TAYLOR_TRACT_DATUM`) in both ASCII and binary
 - [x] Attributes with no value, and single-quoted or unquoted values (done in Phase 1)
+- [x] `String` bodies: split before decoding, quoted on write, numeric entities (done in Phase 3)
 - [ ] Incremental parsing (`Incomplete` vs. `(elements, consumed)`), replacing sumaru's retry loop
 - [ ] Decide whether numeric matrices stay `f64` or become typed columns (this breaks the public API)
 - [ ] Settle the naming differences with sumaru (`NumericMatrix`/`NimlNumericMatrix`, `columns`/`column_count`)
@@ -110,11 +125,13 @@ Brief tasks 5–6.
 
 - [ ] `ni_timestep`, `FDRCURVE_*`, label tables (`VALUE_LABEL_DTABLE`), parent idcodes, keeping unknown `AFNI_atr` elements on round trip
 - [ ] Typed ROI enums: side, drawing type, element kind, brush action
-- [ ] Reuse `StatKind` and the `AFNI_atr` converter from Phase 3
+- [ ] Reuse `StatSpec` and `Header::from_niml` from Phase 3. `NimlDataset` should expose `stats()` and keep its `AFNI_atr`s as a `Header`, so unknown attributes round-trip
+- [ ] `split_semicolons` in `dset.rs` drops empty entries, so `COLMS_LABS`/`COLMS_STATSYM` can shift columns, the same bug `brick_labels` had (see log)
 
 ## Phase 7 — GIfTI swap in sumaru ⬜
 
-- [ ] Map NIfTI intent codes to `StatKind`; helpers to detect data columns; FDR curves stored in metadata
+- [x] Map NIfTI intent codes to `StatKind` (`DataArray::stat`, Phase 3)
+- [ ] Helpers to detect data columns; FDR curves stored in metadata
 - [ ] Port sumaru's `io/gifti.rs` and the GIfTI parts of `surface.rs`/`color.rs`; remove `gifti-rs`
 
 ## Phase 8 — Remaining formats ⬜
@@ -138,6 +155,39 @@ Brief tasks 5–6.
 Newest first. Record anything about AFNI, SUMA or sumaru behaviour that
 affects the design, with the phase it was found in.
 
+- **2026-10-02 · Phase 3.** **sumaru bug, live:** sumaru's NIML writer
+  (`io/niml.rs`, the `NimlData::Text` arm of its serializer) writes `String`
+  bodies unquoted, so AFNI reads only the first word. In sumaru's own cluster
+  output (`tests/data/real/dset/test_lh_full_sumaru_clusters.niml.dset`),
+  `3dNotes` shows the history as just `SurfClust`, losing the rest of the
+  command line. Multi-word column labels lose everything after the first blank
+  and shift later columns to `#n`. afni-io had the same bug, now fixed; sumaru
+  needs the same one-line fix (or the move to afni-io).
+- **2026-10-02 · Phase 3.** AFNI stat codes **are** NIfTI intent codes (2 =
+  Correl … 24 = Log10Pval; `niml_stat.c`). But AFNI's `.HEAD` loader keeps
+  only the classic codes 2–10 (`FUNC_IS_STAT`) and ignores e.g. `Normal`; the
+  crate keeps all 23. When both exist, `BRICK_STATSYM` wins over
+  `BRICK_STATAUX`. Missing parameters are filled with **1.0** from STATSYM
+  (`NI_stat_decode`) but **0.0** from STATAUX (`THD_store_datablock_stataux`).
+- **2026-10-02 · Phase 3.** The NIfTI AFNI extension holds the *entire*
+  `.HEAD` attribute set: every attribute in `stat.nii` matches
+  `stat+orig.HEAD`, including `HISTORY_NOTE`, except `IDCODE_STRING`, which
+  `3dAFNItoNIFTI` regenerates and also puts in the group's `self_idcode`.
+  AFNI ignores an extension of 32 bytes or less, or one not starting with
+  `<?xml`. A NIfTI with several sub-bricks gets `intent_code = 0`; the stats
+  live only in the extension, which is why `-pure` NIfTIs lose them.
+- **2026-10-02 · Phase 3.** In the extension, string attributes are joined
+  and `~` is turned into NUL (`THD_unzblock`; `ZBLOCK` = `~` = 126), the same
+  encoding as `.HEAD`. So one `Header` type covers both. `THD_set_string_atr`
+  stores a terminating NUL, which `Header::string()` trims.
+- **2026-10-02 · Phase 3.** AFNI's GIfTI datasets carry each column's
+  statistic as the DataArray `Intent` plus `intent_p1..3` **metadata**
+  entries, not attributes; the reference ISC GIfTI has six `Ttest(48)`
+  columns.
+- **2026-10-02 · Phase 3.** `NimlDataset`'s `split_semicolons` (and sumaru's)
+  filters out empty entries. A dataset with an empty label in the middle of
+  `COLMS_LABS` would shift later labels onto the wrong columns. Fix in
+  Phase 6.
 - **2026-10-02 · Phase 2.** **Surface coordinates.** SUMA holds surfaces in
   RAI (DICOM). It flips GIfTI x/y on read and on write (`flip_float_triples`
   in `suma_gifti.c`, unless `AFNI_GIFTI_IN_RAI=YES`), and also flips the GIfTI

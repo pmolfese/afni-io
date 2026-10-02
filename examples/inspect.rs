@@ -79,9 +79,7 @@ fn inspect(path: &Path) -> Result<()> {
                 t.slice_offsets.len()
             );
         }
-        for (p, label) in brik.header.brick_labels().iter().enumerate() {
-            println!("  [{p}] {label}");
-        }
+        print_sub_bricks(&brik.header);
     } else if name.ends_with(".spec") {
         let spec = Spec::read(path)?;
         println!("spec  {} surface(s)", spec.surfaces.len());
@@ -135,6 +133,13 @@ fn inspect(path: &Path) -> Result<()> {
             println!("  descrip: {}", vol.header.descrip);
         }
         println!("  affine row0: {:?}", vol.header.affine()[0]);
+        for ext in &vol.extensions {
+            println!("  extension: ecode {} ({} bytes)", ext.code, ext.data.len());
+        }
+        if let Some(afni) = vol.afni_header()? {
+            println!("  AFNI extension: {} attributes", afni.attributes.len());
+            print_sub_bricks(&afni);
+        }
     } else if name.ends_with(".1d") {
         let one = OneD::read(path)?;
         println!("1D  {} rows x {} cols", one.rows, one.cols);
@@ -149,4 +154,15 @@ fn inspect(path: &Path) -> Result<()> {
         std::process::exit(2);
     }
     Ok(())
+}
+
+/// One line per sub-brick: label and statistic, if any.
+fn print_sub_bricks(header: &Header) {
+    let stats = header.brick_stats();
+    for (p, label) in header.brick_labels().iter().enumerate() {
+        match &stats[p] {
+            Some(stat) => println!("  [{p}] {label}  {}", stat.to_statsym()),
+            None => println!("  [{p}] {label}"),
+        }
+    }
 }

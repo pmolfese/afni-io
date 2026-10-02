@@ -10,16 +10,27 @@
 //! * detached `.hdr`/`.img` pairs (magic `ni1`/`ni2`),
 //! * little- and big-endian data.
 //!
-//! Writing emits a single-file `.nii` matching the header's version, in
-//! little-endian, with no header extensions.
+//! Header extensions (the `(esize, ecode, data)` records between the header
+//! and `vox_offset`) are read into [`Nifti::extensions`] and written back
+//! out. AFNI stores its full `.HEAD` attribute set in one with
+//! `ecode = 4`; [`Nifti::afni_header`] decodes it, so sub-brick labels and
+//! statistics (`BRICK_LABS`, `BRICK_STATAUX`, ...) survive in `.nii` files
+//! written by `3dttest++`, `3dDeconvolve` and other AFNI programs.
 //!
-//! Reference: the [NIfTI-1](https://nifti.nimh.nih.gov/nifti-1) and
-//! [NIfTI-2](https://nifti.nimh.nih.gov/nifti-2) header definitions.
+//! Writing emits a single-file `.nii` matching the header's version, in
+//! little-endian.
+//!
+//! References: the [NIfTI-1](https://nifti.nimh.nih.gov/nifti-1) and
+//! [NIfTI-2](https://nifti.nimh.nih.gov/nifti-2) header definitions; for the
+//! AFNI extension, `afni/src/thd_niftiread.c` (`THD_nifti_process_afni_ext`),
+//! `thd_niftiwrite.c` and `thd_nimlatr.c`.
 
 use std::path::{Path, PathBuf};
 
 use crate::array::{self, DataType, TypedArray};
 use crate::error::{self, Error, Result};
+use crate::head::Header;
+use crate::niml::{NimlData, NimlElement};
 
 /// Which NIfTI header layout a volume uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,11 +197,26 @@ impl NiftiHeader {
     }
 }
 
-/// A loaded NIfTI volume: its header plus the decoded voxel buffer.
+/// `ecode` of the AFNI header extension (`NIFTI_ECODE_AFNI`).
+pub const ECODE_AFNI: i32 = 4;
+
+/// One NIfTI header extension, kept as raw bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NiftiExtension {
+    /// The extension code (`ecode`), e.g. [`ECODE_AFNI`].
+    pub code: i32,
+    /// The payload, without the 8-byte `esize`/`ecode` prefix. It includes
+    /// any padding the writer added to reach a multiple of 16 bytes.
+    pub data: Vec<u8>,
+}
+
+/// A loaded NIfTI volume: its header, extensions, and decoded voxel buffer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Nifti {
     /// The parsed header.
     pub header: NiftiHeader,
+    /// Header extensions, in file order.
+    pub extensions: Vec<NiftiExtension>,
     /// The voxel data, flat in column-major (Fortran) order as NIfTI stores it.
     pub data: TypedArray,
 }
@@ -205,15 +231,26 @@ impl Nifti {
         }
         let header = NiftiHeader::parse(&bytes)?;
 
-        // Single-file (n+1/n+2): data follows in the same buffer. Detached
-        // (ni1/ni2): data lives in the sibling `.img`.
+        // Single-file (n+1/n+2): extensions run up to vox_offset and data
+        // follows in the same buffer. Detached (ni1/ni2): extensions run to
+        // the end of the .hdr and data lives in the sibling `.img`.
         if header.magic.starts_with("n+") {
+            let extensions = parse_extensions(&header, &bytes, header.vox_offset.max(0) as usize);
             let data = read_data(&header, &bytes, header.vox_offset as usize)?;
-            Ok(Self { header, data })
+            Ok(Self {
+                header,
+                extensions,
+                data,
+            })
         } else {
+            let extensions = parse_extensions(&header, &bytes, bytes.len());
             let img_bytes = read_img_sibling(path)?;
             let data = read_data(&header, &img_bytes, header.vox_offset.max(0) as usize)?;
-            Ok(Self { header, data })
+            Ok(Self {
+                header,
+                extensions,
+                data,
+            })
         }
     }
 
@@ -234,8 +271,70 @@ impl Nifti {
                 "detached ni1/ni2 header passed to from_bytes; use read()",
             ));
         };
+        let extensions = parse_extensions(&header, bytes, offset);
         let data = read_data(&header, bytes, offset)?;
-        Ok(Self { header, data })
+        Ok(Self {
+            header,
+            extensions,
+            data,
+        })
+    }
+
+    /// The AFNI attributes stored in the first AFNI extension
+    /// ([`ECODE_AFNI`]), as a [`Header`] with the same accessors as a
+    /// `.HEAD` file (`brick_labels`, `brick_stats`, `ijk_to_dicom`, ...).
+    ///
+    /// `Ok(None)` when there is no AFNI extension, or (as in
+    /// `THD_nifti_process_afni_ext`) when it is too short or holds no
+    /// `AFNI_attributes` group. An extension that does not start with an XML
+    /// prolog, or whose NIML does not parse, is an error.
+    pub fn afni_header(&self) -> Result<Option<Header>> {
+        // AFNI requires esize > 32, i.e. more than 24 payload bytes.
+        let Some(ext) = self
+            .extensions
+            .iter()
+            .find(|e| e.code == ECODE_AFNI && e.data.len() > 24)
+        else {
+            return Ok(None);
+        };
+        let end = ext
+            .data
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(ext.data.len());
+        let text = std::str::from_utf8(&ext.data[..end])
+            .map_err(|e| Error::parse(format!("NIfTI AFNI extension is not UTF-8: {e}")))?;
+        if !text.starts_with("<?xml") {
+            return Err(Error::parse(
+                "NIfTI AFNI extension does not start with <?xml",
+            ));
+        }
+        let body = text
+            .find("?>")
+            .map(|i| &text[i + 2..])
+            .ok_or_else(|| Error::parse("NIfTI AFNI extension has no end to its XML prolog"))?;
+        let elements = crate::niml::parse_str(body)?;
+        Ok(elements
+            .iter()
+            .find_map(find_afni_attributes)
+            .map(Header::from_niml))
+    }
+
+    /// Store `header` as the AFNI extension, replacing any existing one, in
+    /// the layout `3dAFNItoNIFTI` writes (an XML prolog, then an
+    /// `AFNI_attributes` NIML group).
+    pub fn set_afni_header(&mut self, header: &Header) {
+        let mut data = b"<?xml version='1.0' ?>\n".to_vec();
+        data.extend_from_slice(crate::niml::serialize(&[header.to_niml()]).as_bytes());
+        data.push(0);
+        let ext = NiftiExtension {
+            code: ECODE_AFNI,
+            data,
+        };
+        match self.extensions.iter_mut().find(|e| e.code == ECODE_AFNI) {
+            Some(existing) => *existing = ext,
+            None => self.extensions.push(ext),
+        }
     }
 
     /// The spatial/temporal shape.
@@ -272,9 +371,32 @@ impl Nifti {
         self.get_scaled(t * vol_stride + i + j * nx + k * nx * ny)
     }
 
-    /// Serialise to a single-file `.nii` byte buffer.
+    /// Serialise to a single-file `.nii` byte buffer, including extensions.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = self.header.serialize_single_file();
+        if !self.extensions.is_empty() {
+            // The 4-byte extender follows the header; its first byte set
+            // means extensions follow.
+            let extender = out.len() - 4;
+            out[extender] = 1;
+            for ext in &self.extensions {
+                // esize counts the 8-byte prefix and is a multiple of 16.
+                let esize = (8 + ext.data.len()).div_ceil(16) * 16;
+                out.extend_from_slice(&(esize as i32).to_le_bytes());
+                out.extend_from_slice(&ext.code.to_le_bytes());
+                out.extend_from_slice(&ext.data);
+                out.resize(out.len() + esize - 8 - ext.data.len(), 0);
+            }
+            let vox_offset = out.len();
+            match self.header.version {
+                NiftiVersion::Nifti1 => {
+                    out[108..112].copy_from_slice(&(vox_offset as f32).to_le_bytes())
+                }
+                NiftiVersion::Nifti2 => {
+                    out[168..176].copy_from_slice(&(vox_offset as i64).to_le_bytes())
+                }
+            }
+        }
         out.extend_from_slice(&self.data.to_bytes(true));
         out
     }
@@ -290,6 +412,55 @@ impl Nifti {
         };
         error::write_file(path, &bytes)
     }
+}
+
+/// The `AFNI_attributes` group: `element` itself or, as AFNI does with
+/// `NI_search_group_deep`, the first one nested inside it.
+fn find_afni_attributes(element: &NimlElement) -> Option<&NimlElement> {
+    let NimlData::Group(children) = &element.data else {
+        return None;
+    };
+    if element.name == "AFNI_attributes" {
+        return Some(element);
+    }
+    children.iter().find_map(find_afni_attributes)
+}
+
+/// Read the extension list that follows the header, stopping at `end` (the
+/// voxel offset, or the end of a detached `.hdr`). A malformed record ends
+/// the list rather than failing the read, so the voxels stay readable.
+fn parse_extensions(header: &NiftiHeader, bytes: &[u8], end: usize) -> Vec<NiftiExtension> {
+    let start = match header.version {
+        NiftiVersion::Nifti1 => 348,
+        NiftiVersion::Nifti2 => 540,
+    };
+    let end = end.min(bytes.len());
+    // No extender, or its first byte is 0: no extensions.
+    if start + 4 > end || bytes[start] == 0 {
+        return Vec::new();
+    }
+    let int = |at: usize| {
+        let raw = [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]];
+        if header.little_endian {
+            i32::from_le_bytes(raw)
+        } else {
+            i32::from_be_bytes(raw)
+        }
+    };
+    let mut out = Vec::new();
+    let mut pos = start + 4;
+    while pos + 8 <= end {
+        let esize = int(pos);
+        if esize < 8 || pos + esize as usize > end {
+            break;
+        }
+        out.push(NiftiExtension {
+            code: int(pos + 4),
+            data: bytes[pos + 8..pos + esize as usize].to_vec(),
+        });
+        pos += esize as usize;
+    }
+    out
 }
 
 fn read_data(header: &NiftiHeader, bytes: &[u8], offset: usize) -> Result<TypedArray> {
@@ -805,8 +976,44 @@ mod tests {
     fn volume(version: NiftiVersion) -> Nifti {
         Nifti {
             header: header(version),
+            extensions: Vec::new(),
             data: TypedArray::Float32((0..8).map(|i| i as f32).collect()),
         }
+    }
+
+    #[test]
+    fn extensions_round_trip_in_both_versions() {
+        use crate::head::AttributeValue;
+        for version in [NiftiVersion::Nifti1, NiftiVersion::Nifti2] {
+            let mut vol = volume(version);
+            vol.extensions.push(NiftiExtension {
+                code: 6, // NIFTI_ECODE_COMMENT, kept as raw bytes
+                data: b"hello".to_vec(),
+            });
+            let mut afni = crate::head::Header::default();
+            afni.set("DATASET_RANK", AttributeValue::Int(vec![3, 2]));
+            afni.set("BRICK_LABS", AttributeValue::String("a b\0c\0".into()));
+            afni.set(
+                "BRICK_STATAUX",
+                AttributeValue::Float(vec![1.0, 3.0, 1.0, 23.0]),
+            );
+            vol.set_afni_header(&afni);
+
+            let back = Nifti::from_bytes(&vol.to_bytes()).unwrap();
+            assert_eq!(back.data, vol.data, "{version:?}");
+            assert_eq!(back.extensions.len(), 2);
+            assert_eq!(back.extensions[0].code, 6);
+            assert_eq!(&back.extensions[0].data[..5], b"hello");
+            // esize is padded to a multiple of 16 (8-byte prefix + payload).
+            assert_eq!((8 + back.extensions[0].data.len()) % 16, 0);
+
+            let got = back.afni_header().unwrap().unwrap();
+            assert_eq!(got.brick_labels(), ["a b", "c"]);
+            let stats = got.brick_stats();
+            assert!(stats[0].is_none());
+            assert_eq!(stats[1].as_ref().unwrap().to_statsym(), "Ttest(23)");
+        }
+        assert_eq!(volume(NiftiVersion::Nifti1).afni_header().unwrap(), None);
     }
 
     #[test]

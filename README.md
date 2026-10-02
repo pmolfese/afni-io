@@ -43,10 +43,20 @@ seconds as AFNI does). Coordinates are always returned in the convention of
 the file they came from. The `geometry` module docs explain RAI vs RAS for
 AFNI, NIfTI, GIfTI and FreeSurfer.
 
+**Statistics** (`stat`): one `StatSpec` type (e.g. `Ttest(23)`) for every
+place AFNI records what a sub-brick or column holds: `.HEAD`
+`BRICK_STATSYM`/`BRICK_STATAUX` (`Header::brick_stats`), the NIfTI AFNI
+extension, NIML `COLMS_STATSYM`, and GIfTI intents (`DataArray::stat`). AFNI
+stat codes are NIfTI intent codes, so these all map to the same 23 kinds.
+p-value maths is left to other crates.
+
 **NIfTI**: both the 348-byte NIfTI-1 and 540-byte NIfTI-2 headers, automatic
 byte-order detection, `scl_slope`/`scl_inter` scaling, and the qform/sform
 voxel-to-world affine. Single-file `.nii`/`.nii.gz` and detached `.hdr`/`.img`
-pairs are read; writing emits a single-file little-endian `.nii(.gz)`.
+pairs are read; writing emits a single-file little-endian `.nii(.gz)`. Header
+extensions are kept and written back. `Nifti::afni_header()` decodes AFNI's
+extension (ecode 4) into the same `Header` type a `.HEAD` file gives, so
+labels, statistics and geometry read the same way from either format.
 
 **GIfTI**: ASCII, `Base64Binary`, and `GZipBase64Binary` data arrays (plus the
 legacy `GIFTI_ENCODING_*` token spellings), metadata, coordinate systems, and

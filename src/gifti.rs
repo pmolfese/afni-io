@@ -288,6 +288,22 @@ impl DataArray {
     pub fn element_count(&self) -> usize {
         self.dims.iter().copied().product()
     }
+
+    /// The statistic this array holds, from its `Intent` (a NIfTI intent
+    /// code, which is also AFNI's stat code) and its `intent_p1`..`intent_p3`
+    /// metadata, as AFNI's GIfTI code writes them. `None` when the intent is
+    /// not a statistic (e.g. `NIFTI_INTENT_NONE`, `POINTSET`).
+    pub fn stat(&self) -> Option<crate::stat::StatSpec> {
+        let param = |key| {
+            meta_get(&self.meta, key)
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0.0)
+        };
+        crate::stat::StatSpec::from_nifti_intent(
+            i64::from(self.intent),
+            [param("intent_p1"), param("intent_p2"), param("intent_p3")],
+        )
+    }
 }
 
 /// A complete in-memory GIfTI image.

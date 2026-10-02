@@ -226,7 +226,19 @@ fn parse_body(attrs: &BTreeMap<String, String>, body: &[u8]) -> Result<NimlData>
             NimlValueType::String | NimlValueType::CString
         )
     {
-        return Ok(NimlData::Text(unescape(text.trim())));
+        // One string becomes Text; several (AFNI splits long attributes)
+        // become a one-column table.
+        let mut strings = split_strings(&text);
+        if strings.len() <= 1 {
+            return Ok(NimlData::Text(strings.pop().unwrap_or_default()));
+        }
+        let rows = strings.len();
+        let values = strings.into_iter().map(NimlValue::Text).collect();
+        return Ok(NimlData::Mixed(MixedTable::new(
+            column_types,
+            rows,
+            values,
+        )?));
     }
 
     // SUMA_NIML_ROI_DATUM and other variable-length rows are exposed verbatim
@@ -236,6 +248,40 @@ fn parse_body(attrs: &BTreeMap<String, String>, body: &[u8]) -> Result<NimlData>
     }
 
     Ok(NimlData::Mixed(parse_mixed(&text, column_types, rows)?))
+}
+
+/// Split the body of a `String` column into its strings, as
+/// `NI_decode_one_string` (`niml_elemio.c`) does: each is either quoted with
+/// `"` or `'` (up to the matching quote) or a run of non-blank characters.
+/// Entities are decoded after splitting, so an escaped quote never ends a
+/// string early. An unterminated quote runs to the end of the body.
+fn split_strings(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    let mut pos = 0;
+    loop {
+        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+            pos += 1;
+        }
+        let Some(&first) = bytes.get(pos) else {
+            break;
+        };
+        let (start, end, next) = if first == b'"' || first == b'\'' {
+            let start = pos + 1;
+            let end = body[start..]
+                .find(first as char)
+                .map_or(body.len(), |i| start + i);
+            (start, end, end + 1)
+        } else {
+            let end = body[pos..]
+                .find(|c: char| c.is_ascii_whitespace())
+                .map_or(body.len(), |i| pos + i);
+            (pos, end, end)
+        };
+        out.push(unescape(&body[start..end]));
+        pos = next;
+    }
+    out
 }
 
 fn parse_ascii_matrix(

@@ -26,10 +26,13 @@
 //! Reference: `afni/src/matlab/README.attributes`, `BrikInfo.m`,
 //! `WriteBrikHEAD.m`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{self, from_utf8, Error, Result};
 use crate::geometry::{Mat44, Orientation, TimeAxis, TimeUnits, View};
+use crate::niml::{NimlData, NimlElement, NimlValue, NimlValueType, NumericMatrix};
+use crate::stat::{parse_statsym_list, StatKind, StatSpec, ThresholdCurve};
 
 /// The value array of a single header [`Attribute`].
 #[derive(Debug, Clone, PartialEq)]
@@ -454,6 +457,180 @@ impl Header {
             slice_z_origin,
             slice_dz,
         })
+    }
+
+    // --- Statistics (see `crate::stat`) -------------------------------------
+
+    /// The statistic held by each sub-brick (`nvals` entries; `None` where a
+    /// sub-brick is not a statistic).
+    ///
+    /// Follows `thd_initdblk.c`: a non-empty `BRICK_STATSYM` (e.g.
+    /// `Ttest(23);none;Ftest(2,40)`) wins; otherwise `BRICK_STATAUX` records
+    /// `[sub-brick, code, nparams, params...]` are used, with parameters
+    /// zero-filled or truncated to the count the statistic needs. Unlike
+    /// AFNI, codes 11–24 (e.g. `Normal`) are kept rather than dropped.
+    pub fn brick_stats(&self) -> Vec<Option<StatSpec>> {
+        let nvals = self.nvals();
+        let mut stats = vec![None; nvals];
+        if let Some(symbols) = self
+            .string("BRICK_STATSYM")
+            .filter(|s| !s.trim().is_empty())
+        {
+            for (p, spec) in parse_statsym_list(symbols)
+                .into_iter()
+                .take(nvals)
+                .enumerate()
+            {
+                stats[p] = spec;
+            }
+            return stats;
+        }
+        let aux = self.floats("BRICK_STATAUX").unwrap_or_default();
+        let mut pos = 0;
+        while pos + 3 <= aux.len() {
+            let (p, code, count) = (aux[pos], aux[pos + 1], aux[pos + 2]);
+            pos += 3;
+            let count = (count.max(0.0) as usize).min(aux.len() - pos);
+            let params = &aux[pos..pos + count];
+            pos += count;
+            if p >= 0.0 && (p as usize) < nvals {
+                if let Some(kind) = StatKind::from_code(code as i64) {
+                    stats[p as usize] = Some(StatSpec::new(kind, params, 0.0));
+                }
+            }
+        }
+        stats
+    }
+
+    /// The FDR curve for sub-brick `p` (`FDRCURVE_%06d`), if present.
+    pub fn fdr_curve(&self, p: usize) -> Option<ThresholdCurve> {
+        ThresholdCurve::from_values(&self.floats(&format!("FDRCURVE_{p:06}"))?)
+    }
+
+    /// The missed-detection-fraction curve for sub-brick `p`
+    /// (`MDFCURVE_%06d`), if present.
+    pub fn mdf_curve(&self, p: usize) -> Option<ThresholdCurve> {
+        ThresholdCurve::from_values(&self.floats(&format!("MDFCURVE_{p:06}"))?)
+    }
+
+    // --- NIML form: `AFNI_atr` elements ---------------------------------------
+
+    /// Build a header from NIML `AFNI_atr` elements, as AFNI does for the
+    /// NIfTI AFNI extension and for NIML datasets (`THD_dblkatr_from_niml`,
+    /// `thd_nimlatr.c`).
+    ///
+    /// Every `AFNI_atr` element (name matched case-insensitively) in `group`
+    /// and its sub-groups with a non-empty `atr_name` (or `AFNI_name`) and a
+    /// single non-empty column becomes an attribute: integer columns become
+    /// [`AttributeValue::Int`], floating-point columns
+    /// [`AttributeValue::Float`], and strings are joined and decoded like
+    /// `.HEAD` strings (`~` becomes NUL, plus a terminating NUL). Anything else
+    /// is skipped, as AFNI skips it. A `self_idcode` (or `AFNI_idcode`) on the
+    /// group overrides `IDCODE_STRING`.
+    pub fn from_niml(group: &NimlElement) -> Self {
+        fn collect(group: &NimlElement, header: &mut Header) {
+            let NimlData::Group(children) = &group.data else {
+                return;
+            };
+            for child in children {
+                if matches!(child.data, NimlData::Group(_)) {
+                    collect(child, header);
+                    continue;
+                }
+                if !child.name.eq_ignore_ascii_case("AFNI_atr") {
+                    continue;
+                }
+                let Some(name) = child
+                    .attrs
+                    .get("atr_name")
+                    .or_else(|| child.attrs.get("AFNI_name"))
+                    .filter(|n| !n.is_empty())
+                else {
+                    continue;
+                };
+                let value = match &child.data {
+                    NimlData::Numeric(m) if m.columns() == 1 && m.rows > 0 => {
+                        if m.column_types[0].is_integer() {
+                            AttributeValue::Int(m.values.iter().map(|&v| v as i64).collect())
+                        } else {
+                            AttributeValue::Float(m.values.clone())
+                        }
+                    }
+                    NimlData::Text(text) => AttributeValue::String(decode_string(text) + "\0"),
+                    NimlData::Mixed(t)
+                        if t.columns() == 1
+                            && t.rows > 0
+                            && t.values.iter().all(|v| matches!(v, NimlValue::Text(_))) =>
+                    {
+                        let joined: String = t
+                            .values
+                            .iter()
+                            .map(|v| match v {
+                                NimlValue::Text(s) => s.as_str(),
+                                _ => "",
+                            })
+                            .collect();
+                        AttributeValue::String(decode_string(&joined) + "\0")
+                    }
+                    _ => continue,
+                };
+                header.set(name.clone(), value);
+            }
+        }
+
+        let mut header = Header::default();
+        collect(group, &mut header);
+        if let Some(id) = group
+            .attrs
+            .get("self_idcode")
+            .or_else(|| group.attrs.get("AFNI_idcode"))
+            .filter(|id| !id.is_empty())
+        {
+            // THD_set_string_atr stores the terminating NUL, like every other
+            // string attribute.
+            header.set("IDCODE_STRING", AttributeValue::String(format!("{id}\0")));
+        }
+        header
+    }
+
+    /// The header as an `AFNI_attributes` NIML group of `AFNI_atr` elements,
+    /// the layout AFNI writes into a NIfTI AFNI extension
+    /// (`THD_nimlize_dsetatr`). Strings are encoded like `.HEAD` strings
+    /// (NUL becomes `~`) without their final terminator.
+    pub fn to_niml(&self) -> NimlElement {
+        let children = self
+            .attributes
+            .iter()
+            .map(|attr| {
+                let mut attrs = BTreeMap::new();
+                attrs.insert("atr_name".to_string(), attr.name.clone());
+                let data = match &attr.value {
+                    AttributeValue::Int(v) => NimlData::Numeric(NumericMatrix {
+                        column_types: vec![NimlValueType::Int32],
+                        rows: v.len(),
+                        values: v.iter().map(|&x| x as f64).collect(),
+                    }),
+                    AttributeValue::Float(v) => NimlData::Numeric(NumericMatrix {
+                        column_types: vec![NimlValueType::Float32],
+                        rows: v.len(),
+                        values: v.clone(),
+                    }),
+                    AttributeValue::String(s) => {
+                        NimlData::Text(s.strip_suffix('\0').unwrap_or(s).replace('\0', "~"))
+                    }
+                };
+                NimlElement {
+                    name: "AFNI_atr".to_string(),
+                    attrs,
+                    data,
+                }
+            })
+            .collect();
+        let mut attrs = BTreeMap::new();
+        if let Some(id) = self.idcode() {
+            attrs.insert("self_idcode".to_string(), id.to_string());
+        }
+        NimlElement::group("AFNI_attributes", attrs, children)
     }
 
     /// Serialise to `.HEAD` text.
