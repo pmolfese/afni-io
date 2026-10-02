@@ -47,7 +47,8 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::head::Header;
+use crate::geometry::{Orientation, View};
+use crate::head::{AttributeValue, Header};
 
 /// AFNI sub-brick storage types (the `BRICK_TYPES` codes, which are the
 /// `MRI_TYPE` enum in `mrilib.h`).
@@ -189,6 +190,23 @@ impl BrickData {
         })
     }
 
+    /// The voxels as little-endian bytes, the layout written to a `.BRIK`.
+    pub fn to_le_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Byte(v) => v.clone(),
+            Self::Short(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Self::Int(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Self::Float(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Self::Double(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Self::Complex(v) => v
+                .iter()
+                .flat_map(|[re, im]| [re.to_le_bytes(), im.to_le_bytes()].concat())
+                .collect(),
+            Self::Rgb(v) => v.iter().flatten().copied().collect(),
+            Self::Rgba(v) => v.iter().flatten().copied().collect(),
+        }
+    }
+
     /// Decode `bytes` (exactly `voxels * ty.byte_width()` long) as `ty`.
     fn decode(ty: BrikType, bytes: &[u8], little: bool) -> Self {
         fn arr<const N: usize>(chunk: &[u8], little: bool) -> [u8; N] {
@@ -292,6 +310,32 @@ impl SubBrick {
         self.data
             .raw_scalar(index)
             .map(|v| (v * f64::from(self.scale())) as f32)
+    }
+
+    /// The `[min, max]` AFNI records in `BRICK_STATS`: the range of the
+    /// scaled finite values, using magnitude for complex and luminance
+    /// (`0.299 R + 0.587 G + 0.114 B`) for RGB/RGBA, as `THD_load_statistics`
+    /// does. `[0, 0]` when there are no finite values.
+    pub fn stats(&self) -> [f64; 2] {
+        let luminance = |r: u8, g: u8, b: u8| {
+            0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b)
+        };
+        let scale = f64::from(self.scale());
+        let values: Box<dyn Iterator<Item = f64>> = match &self.data {
+            BrickData::Rgb(v) => Box::new(v.iter().map(move |&[r, g, b]| luminance(r, g, b))),
+            BrickData::Rgba(v) => Box::new(v.iter().map(move |&[r, g, b, _]| luminance(r, g, b))),
+            _ => Box::new(
+                (0..self.len())
+                    .filter_map(|i| self.data.raw_scalar(i))
+                    .map(move |v| v * scale),
+            ),
+        };
+        values
+            .filter(|v| v.is_finite())
+            .fold(None, |range: Option<[f64; 2]>, v| {
+                Some(range.map_or([v, v], |[lo, hi]| [lo.min(v), hi.max(v)]))
+            })
+            .unwrap_or([0.0, 0.0])
     }
 
     /// Every voxel as a scaled `f32`, in `(i + j*nx + k*nx*ny)` order, or
@@ -528,6 +572,196 @@ impl Brik {
         })
     }
 
+    /// Build a new dataset from scratch on a cardinal (non-oblique) grid.
+    ///
+    /// `origin` and `delta` are in AFNI's signed DICOM sense (see
+    /// [`crate::geometry`]); for example an LPI grid with 2 mm voxels has
+    /// `delta = [-2.0, -2.0, 2.0]`. The header gets the attributes AFNI
+    /// writes for a new bucket dataset (`3DIM_HEAD_FUNC`, `+orig`), and
+    /// [`Brik::write`] fills in the datum, scale and statistics attributes.
+    pub fn new(
+        dimensions: [usize; 3],
+        orientation: [Orientation; 3],
+        origin: [f64; 3],
+        delta: [f64; 3],
+        sub_bricks: Vec<SubBrick>,
+    ) -> Result<Self> {
+        let mut header = Header::default();
+        header.set(
+            "TYPESTRING",
+            AttributeValue::String("3DIM_HEAD_FUNC".into()),
+        );
+        header.set("IDCODE_STRING", AttributeValue::String(new_idcode()));
+        header.set("IDCODE_DATE", AttributeValue::String(ctime_utc()));
+        // [view, func_type, type]: +orig, FUNC_BUCK_TYPE, HEAD_FUNC_TYPE.
+        header.set("SCENE_DATA", AttributeValue::Int(vec![0, 11, 1]));
+        header.set(
+            "ORIENT_SPECIFIC",
+            AttributeValue::Int(orientation.iter().map(|o| o.code()).collect()),
+        );
+        header.set("ORIGIN", AttributeValue::Float(origin.to_vec()));
+        header.set("DELTA", AttributeValue::Float(delta.to_vec()));
+        let dims: Vec<i64> = dimensions.iter().map(|&d| d as i64).collect();
+        header.set(
+            "DATASET_RANK",
+            AttributeValue::Int(vec![3, sub_bricks.len() as i64]),
+        );
+        header.set("DATASET_DIMENSIONS", AttributeValue::Int(dims));
+        let cardinal = header.ijk_to_dicom_cardinal()?;
+        let flat: Vec<f64> = cardinal[..3].iter().flatten().copied().collect();
+        header.set("IJK_TO_DICOM", AttributeValue::Float(flat.clone()));
+        header.set("IJK_TO_DICOM_REAL", AttributeValue::Float(flat));
+        header.set("TEMPLATE_SPACE", AttributeValue::String("ORIG".into()));
+
+        let brik = Self {
+            header,
+            dimensions,
+            sub_bricks: sub_bricks.into_iter().map(Some).collect(),
+        };
+        brik.check_complete()?;
+        Ok(brik)
+    }
+
+    /// Write the dataset as a `.HEAD` + `.BRIK` pair, returning the files
+    /// written. `path` is any name [`AfniPaths::resolve`] accepts, or a bare
+    /// prefix, in which case the view comes from the header (`+orig` if it
+    /// has none). A path ending in `.BRIK.gz` writes a gzipped BRIK.
+    ///
+    /// Every sub-brick must be loaded. The voxels are written little-endian,
+    /// and the header written alongside is brought into line with them, as
+    /// AFNI's `THD_write_3dim_dataset` does: `DATASET_RANK`,
+    /// `DATASET_DIMENSIONS`, `BRICK_TYPES`, `BRICK_FLOAT_FACS`,
+    /// `BRICK_STATS`, `BYTEORDER_STRING` and the view in `SCENE_DATA` are
+    /// updated, and the dataset gets a new `IDCODE_STRING` and `IDCODE_DATE`.
+    /// Other attributes (labels, statistics, geometry, history) are written
+    /// as they are, so keep them consistent if you change the sub-bricks.
+    ///
+    /// Existing files are overwritten. To avoid leaving a stale copy that
+    /// [`AfniPaths::resolve`] would pick up, it is an error if the other
+    /// form of the BRIK (`.BRIK` vs `.BRIK.gz`) already exists.
+    pub fn write(&self, path: impl AsRef<Path>) -> Result<AfniPaths> {
+        self.check_complete()?;
+        let path = path.as_ref();
+        let text = path
+            .to_str()
+            .ok_or_else(|| Error::invalid("non-UTF-8 dataset path"))?;
+        let gzip = text.ends_with(".BRIK.gz");
+        let (base, view) = match AfniPaths::base_name(path) {
+            Some(base) => {
+                let view = VIEWS
+                    .iter()
+                    .position(|v| base.ends_with(v))
+                    .and_then(|i| View::from_code(i as i64));
+                (base, view)
+            }
+            None => {
+                let view = self.header.view().unwrap_or(View::Orig);
+                (format!("{text}{}", view.suffix()), Some(view))
+            }
+        };
+        let head = PathBuf::from(format!("{base}.HEAD"));
+        let brik = PathBuf::from(format!("{base}.BRIK{}", if gzip { ".gz" } else { "" }));
+        let other = PathBuf::from(format!("{base}.BRIK{}", if gzip { "" } else { ".gz" }));
+        if other.exists() {
+            return Err(Error::invalid(format!(
+                "{} exists; remove it before writing {}",
+                other.display(),
+                brik.display()
+            )));
+        }
+
+        let header = self.header_for_writing(view);
+        let mut bytes = Vec::new();
+        for sub in self.sub_bricks.iter().flatten() {
+            bytes.extend_from_slice(&sub.data.to_le_bytes());
+        }
+        if gzip {
+            bytes = crate::compress::gzip(&bytes);
+        }
+        crate::error::write_file(&brik, &bytes)?;
+        header.write(&head)?;
+        Ok(AfniPaths {
+            head,
+            brik: Some(brik),
+        })
+    }
+
+    /// The header [`Brik::write`] writes: this one with its datum, scale,
+    /// size, statistics, byte order, view and ID attributes updated.
+    fn header_for_writing(&self, view: Option<View>) -> Header {
+        let mut h = self.header.clone();
+        let subs: Vec<&SubBrick> = self.sub_bricks.iter().flatten().collect();
+        let nvals = subs.len() as i64;
+
+        let mut rank = h
+            .ints("DATASET_RANK")
+            .map(<[i64]>::to_vec)
+            .unwrap_or_default();
+        rank.resize(rank.len().max(2), 0);
+        rank[0] = 3;
+        rank[1] = nvals;
+        h.set("DATASET_RANK", AttributeValue::Int(rank));
+
+        let mut dims = h
+            .ints("DATASET_DIMENSIONS")
+            .map(<[i64]>::to_vec)
+            .unwrap_or_default();
+        dims.resize(dims.len().max(3), 0);
+        for (d, &n) in dims.iter_mut().zip(&self.dimensions) {
+            *d = n as i64;
+        }
+        h.set("DATASET_DIMENSIONS", AttributeValue::Int(dims));
+
+        h.set(
+            "BRICK_TYPES",
+            AttributeValue::Int(subs.iter().map(|s| s.brik_type().code()).collect()),
+        );
+        h.set(
+            "BRICK_FLOAT_FACS",
+            AttributeValue::Float(subs.iter().map(|s| f64::from(s.factor)).collect()),
+        );
+        h.set(
+            "BRICK_STATS",
+            AttributeValue::Float(subs.iter().flat_map(|s| s.stats()).collect()),
+        );
+        h.set(
+            "BYTEORDER_STRING",
+            AttributeValue::String("LSB_FIRST".into()),
+        );
+        if let Some(view) = view {
+            let mut scene = h
+                .ints("SCENE_DATA")
+                .map(<[i64]>::to_vec)
+                .unwrap_or_default();
+            scene.resize(scene.len().max(3), 0);
+            scene[0] = view as i64;
+            h.set("SCENE_DATA", AttributeValue::Int(scene));
+        }
+        h.set("IDCODE_STRING", AttributeValue::String(new_idcode()));
+        h.set("IDCODE_DATE", AttributeValue::String(ctime_utc()));
+        h
+    }
+
+    /// Every sub-brick is loaded and has one value per voxel.
+    fn check_complete(&self) -> Result<()> {
+        let voxels = self.voxels();
+        for (p, sub) in self.sub_bricks.iter().enumerate() {
+            let sub = sub
+                .as_ref()
+                .ok_or_else(|| Error::invalid(format!("sub-brick {p} is not loaded")))?;
+            if sub.len() != voxels {
+                return Err(Error::invalid(format!(
+                    "sub-brick {p} has {} voxels but the grid has {voxels}",
+                    sub.len()
+                )));
+            }
+        }
+        if self.sub_bricks.is_empty() {
+            return Err(Error::invalid("a dataset needs at least one sub-brick"));
+        }
+        Ok(())
+    }
+
     /// Number of sub-bricks in the dataset (loaded or not).
     pub fn nvals(&self) -> usize {
         self.sub_bricks.len()
@@ -623,6 +857,67 @@ impl Source<'_> {
         }
         Ok(())
     }
+}
+
+/// A fresh dataset ID in AFNI's form: `AFN_` plus 22 characters from
+/// `[A-Za-z0-9_-]` (`UNIQ_idcode`). Uniqueness comes from the standard
+/// library's randomly keyed hasher plus the time and a counter.
+fn new_idcode() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut id = String::from("AFN_");
+    let mut bits = 0u128;
+    for round in 0..2u64 {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(nanos);
+        h.write_u64(count);
+        h.write_u64(round);
+        h.write_u32(std::process::id());
+        bits = (bits << 64) | u128::from(h.finish());
+    }
+    for _ in 0..22 {
+        id.push(ALPHABET[(bits & 63) as usize] as char);
+        bits >>= 6;
+    }
+    id
+}
+
+/// The current UTC time in C `ctime` form without the newline, as AFNI
+/// writes `IDCODE_DATE`: `Fri Oct  2 16:59:33 2026`.
+fn ctime_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{} {} {day:>2} {:02}:{:02}:{:02} {year}",
+        WEEKDAYS[days.rem_euclid(7) as usize],
+        MONTHS[(month - 1) as usize],
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 fn read_error(path: &Path, p: usize, e: io::Error) -> Error {

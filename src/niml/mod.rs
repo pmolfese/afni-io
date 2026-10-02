@@ -446,14 +446,22 @@ pub(crate) fn unescape(text: &str) -> String {
     out
 }
 
-/// Format an `f64` compactly, trimming trailing zeros but keeping it a float.
+/// Format a float as the shortest decimal that reads back to the same value,
+/// keeping a `.0` on whole numbers.
+///
+/// AFNI floats are 32-bit, so a value that is exactly an `f32` is written
+/// with `f32`'s shortest form (`0.3`, not `0.30000001192092896`); anything
+/// else uses `f64`'s. (A fixed 10 decimals, used before, turned a scale
+/// factor such as 3.0517578e-05 into 0.0000305176 and small p-values into 0.)
 pub(crate) fn format_float(value: f64) -> String {
-    let mut s = format!("{value:.10}");
-    while s.contains('.') && s.ends_with('0') {
-        s.pop();
-    }
-    if s.ends_with('.') {
-        s.push('0');
+    let narrow = value as f32;
+    let mut s = if f64::from(narrow) == value || !value.is_finite() {
+        format!("{narrow}")
+    } else {
+        format!("{value}")
+    };
+    if value.is_finite() && !s.contains('.') {
+        s.push_str(".0");
     }
     s
 }
@@ -517,6 +525,22 @@ mod tests {
             panic!("expected text");
         };
         assert_eq!(text, "hello <world>");
+    }
+
+    #[test]
+    fn floats_round_trip_exactly() {
+        // f32 values come back exactly as f32 (how AFNI reads them) ...
+        for v in [0.3f32, 3.0517578e-05, 1e-12, -2.5, 1e30] {
+            let text = format_float(f64::from(v));
+            assert_eq!(text.parse::<f32>().unwrap(), v, "{text}");
+        }
+        // ... and anything else exactly as f64, e.g. values parsed from text.
+        for v in [0.1, 0.984808, 1e-300, 12.5] {
+            assert_eq!(format_float(v).parse::<f64>().unwrap(), v);
+        }
+        assert_eq!(format_float(0.3f32 as f64), "0.3");
+        assert_eq!(format_float(2.0), "2.0");
+        assert_eq!(format_float(f64::NAN), "NaN");
     }
 
     #[test]

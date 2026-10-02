@@ -55,12 +55,14 @@ impl AttributeValue {
         }
     }
 
-    /// Number of entries (`count =`). For strings, the character count.
+    /// Number of entries (`count =`). For strings, the byte count including
+    /// the terminating NUL that AFNI always stores (added on write when
+    /// missing).
     pub fn count(&self) -> usize {
         match self {
             AttributeValue::Int(v) => v.len(),
             AttributeValue::Float(v) => v.len(),
-            AttributeValue::String(s) => s.len(),
+            AttributeValue::String(s) => s.len() + usize::from(!s.ends_with('\0')),
         }
     }
 }
@@ -663,9 +665,14 @@ fn write_value(value: &AttributeValue, out: &mut String) {
             write_numbers(v.iter().map(|x| crate::niml::format_float(*x)), out)
         }
         AttributeValue::String(s) => {
+            // AFNI writes `count` characters, the last being the terminating
+            // NUL, shown as `~` (`THD_write_atr`). A string read from a file
+            // already ends in NUL; one built in code may not.
             out.push('\'');
             out.push_str(&encode_string(s));
-            out.push('~');
+            if !s.ends_with('\0') {
+                out.push('~');
+            }
         }
     }
 }

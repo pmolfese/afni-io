@@ -11,6 +11,7 @@
 //! | [`dset`] | Surface datasets (`AFNI_dataset`) | `.niml.dset` |
 //! | [`roi`]  | Drawn surface ROIs (`Node_ROI`) | `.niml.roi` |
 //! | [`brik`] | AFNI volume datasets (`.HEAD`/`.BRIK` pair) | `.HEAD` + `.BRIK`/`.BRIK.gz` |
+//! | [`volume`] | AFNI or NIfTI volumes through one API | any of the above |
 //! | [`spec`] | SUMA surface spec files | `.spec` |
 //! | [`surface`] | FreeSurfer/SUMA ASCII surfaces | `.asc` |
 //! | [`gifti`] | GIfTI surface/data XML | `.gii`, `.gii.gz`, `.gii.dset` |
@@ -54,6 +55,7 @@ pub mod roi;
 pub mod spec;
 pub mod stat;
 pub mod surface;
+pub mod volume;
 mod xml;
 
 pub use error::{Error, Result};
@@ -74,4 +76,5 @@ pub mod prelude {
     pub use crate::spec::{Spec, SpecSurface};
     pub use crate::stat::{StatKind, StatSpec, ThresholdCurve};
     pub use crate::surface::Surface;
+    pub use crate::volume::{read_any, read_any_volumes, Volume};
 }

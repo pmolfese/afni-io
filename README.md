@@ -16,12 +16,13 @@ code); the only dependencies are
 | `niml` | Generic NIML element trees (ASCII + binary) | `.niml`, `.niml.asc` | ✅ | ✅ (ASCII) |
 | `dset` | Surface datasets (`AFNI_dataset`) | `.niml.dset` | ✅ | ✅ |
 | `roi`  | Drawn surface ROIs (`Node_ROI`) | `.niml.roi` | ✅ | ✅ |
-| `brik` | AFNI volume datasets (`.HEAD`/`.BRIK` pair) | `.HEAD` + `.BRIK`/`.BRIK.gz` | ✅ | — |
+| `brik` | AFNI volume datasets (`.HEAD`/`.BRIK` pair), all 8 datum types | `.HEAD` + `.BRIK`/`.BRIK.gz` | ✅ | ✅ |
 | `head` | `.HEAD` attributes only (header of the pair) | `.HEAD` | ✅ | ✅ |
 | `spec` | SUMA surface spec files | `.spec` | ✅ | — |
 | `surface` | FreeSurfer/SUMA ASCII surfaces | `.asc` | ✅ | ✅ |
 | `gifti` | GIfTI surface/data XML | `.gii`, `.gii.gz`, `.gii.dset` | ✅ | ✅ |
-| `nifti` | NIfTI-1 / NIfTI-2 volumes | `.nii`, `.nii.gz`, `.hdr`/`.img` | ✅ | ✅ |
+| `nifti` | NIfTI-1 / NIfTI-2 volumes, with header extensions (incl. AFNI's) | `.nii`, `.nii.gz`, `.hdr`/`.img` | ✅ | ✅ |
+| `volume` | Either of the above through one API (`read_any`) | any of the above | ✅ | — |
 | `onedee` | Numeric text tables | `.1D` | ✅ | ✅ |
 
 An AFNI volume is one dataset stored as a `.HEAD`/`.BRIK` pair. `Brik::read`
@@ -31,8 +32,15 @@ lookup on its own. All eight AFNI datum types are read (byte, short, int,
 float, double, complex, rgb, rgba), including datasets that mix them. Each
 sub-brick keeps its stored type and scale factor, and has scaled `f32`
 accessors. `Brik::read_sub_bricks` loads only the sub-bricks you ask for, and
-`.BRIK.gz` is decompressed as it streams. Binary NIML (`binary.lsbfirst` /
-`binary.msbfirst`) is also read.
+`.BRIK.gz` is decompressed as it streams. `Brik::write` writes a dataset
+(plain or gzipped) that AFNI reads back voxel-for-voxel, and `Brik::new`
+builds one from scratch. Binary NIML (`binary.lsbfirst` / `binary.msbfirst`)
+is also read.
+
+**One volume API** (`volume::read_any`): AFNI and NIfTI volumes read the same
+way. You get the grid, the number of volumes, the `ijk -> RAS` matrix, each
+volume as scaled `f32`, and labels and statistics (from the `.HEAD` or the
+NIfTI's AFNI extension).
 
 **Geometry** (`geometry`, plus methods on `head::Header`): the voxel-to-world
 matrix in AFNI's DICOM/RAI convention (`ijk_to_dicom`, using
@@ -85,6 +93,11 @@ for roi in NodeRoi::read_all("V1.niml.roi")? {
 let gii = Gifti::read("rh.white.gii")?;
 let mesh = gii.to_surface()?; // -> afni_io::surface::Surface
 println!("{} vertices, {} faces", mesh.n_vertices(), mesh.n_faces());
+
+// Either volume format through one API
+let vol = read_any("stats+tlrc.HEAD")?; // or "stats.nii.gz"
+let first = vol.frame_f32(0); // scaled values, i fastest
+println!("{:?} x {} volumes, labels {:?}", vol.dimensions(), vol.nvols(), vol.labels()?);
 
 // NIfTI volume (.nii / .nii.gz / .hdr+.img)
 let vol = Nifti::read("epi.nii.gz")?;

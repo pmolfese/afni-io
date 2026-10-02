@@ -15,13 +15,14 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 | 1 | HEAD/BRIK reader parity | ✅ |
 | 2 | Geometry | ✅ |
 | 3 | Stat metadata and the NIfTI AFNI extension | ✅ |
-| 4 | BRIK writing, housekeeping, sumaru volume swap | ⬜ |
+| 4 | BRIK writing, `read_any`, housekeeping | ✅ |
 | 5 | NIML core parity | ⬜ |
 | 6 | `.niml.dset` / ROI parity | ⬜ |
 | 7 | GIfTI swap in sumaru | ⬜ |
 | 8 | Remaining formats | ⬜ |
 | 9 | AFNI talk protocol encoding | ⬜ |
 | 10 | Beyond sumaru's current needs | ⬜ |
+| — | Moving sumaru onto afni-io (you, separately) | ⬜ see checklist |
 
 ---
 
@@ -102,14 +103,33 @@ Public API changes:
 - `NimlData::Text` for a `String` element no longer includes its surrounding quotes.
 - A `String` element with several strings parses as `NimlData::Mixed`.
 
-## Phase 4 — BRIK writing, housekeeping, sumaru volume swap ⬜
+## Phase 4 — BRIK writing, `read_any`, housekeeping ✅
 
-Brief tasks 5–6.
+Brief tasks 5–6. Moving sumaru onto the crate is listed separately below
+(you're doing it outside this work).
 
-- [ ] `Brik::write`, with a round-trip test
-- [ ] README format table, `examples/inspect.rs` stat info (geometry printing was done in Phase 2)
-- [ ] Optional `read_any()` covering both NIfTI and BRIK
-- [ ] Move `sumaru/src/volume.rs` onto the crate and remove the `nifti` dependency
+- [x] `Brik::write(path)`: writes `.HEAD` + `.BRIK`, or `.BRIK.gz` when the path says so. Accepts any AFNI name, or a bare prefix (the view comes from the header). Updates `DATASET_RANK`, `DATASET_DIMENSIONS`, `BRICK_TYPES`, `BRICK_FLOAT_FACS`, `BRICK_STATS`, `BYTEORDER_STRING` (always LSB_FIRST), the view in `SCENE_DATA`, and a fresh `IDCODE_STRING`/`IDCODE_DATE`. Refuses to write if a sub-brick isn't loaded or has the wrong size, or if the other BRIK form (`.BRIK` vs `.BRIK.gz`) exists and would be stale
+- [x] `Brik::new(dims, orientation, origin, delta, sub_bricks)`: a new bucket dataset on a cardinal grid
+- [x] `SubBrick::stats()` (AFNI's `BRICK_STATS`: scaled range, magnitude for complex, luminance for RGB); `BrickData::to_le_bytes()`
+- [x] Round-trip test: every fixture, plain and gzipped, gives identical voxels and identical attributes apart from the refreshed ones; our `BRICK_STATS` match AFNI's
+- [x] **AFNI reads what we write:** `3dmaskdump` of rewritten big-endian, mixed, stat, scaled+gz, oblique and slice-timed datasets is byte-identical to the originals' dumps. `3dinfo` reports the same datum, orientation, obliquity, TR, view, labels and statcodes. A `Brik::new` LPI dataset written as `+tlrc` shows the expected matrix and view
+- [x] `volume::read_any` / `read_any_volumes` → `Volume` (AFNI or NIfTI): `dimensions`, `nvols`, `ijk_to_ras`/`ijk_to_dicom`, `frame_f32(t)`, `value`, `labels`, `stats` (AFNI attributes first, else the NIfTI intent for every volume, as AFNI does), `afni_header`
+- [x] Test: the AFNI and NIfTI versions of each fixture give the same grid, matrix, every volume's values, labels and stats. On real data (sumaru's `sub-3_SurfVol.nii`, `T1.nii.gz`, the 256³×3 BRIK.gz) `read_any` matches AFNI's `3dinfo`/`3dBrickStat`/`3dmaskdump`
+- [x] README format table (BRIK write, NIfTI extensions, `volume`), crate docs, `examples/inspect.rs` (stats were done in Phase 3)
+- [x] Fixed: `.HEAD` string `count` (see log) and float precision in every writer (see log)
+
+Public API changes:
+- `format_float` output changed: shortest exact form, e.g. `0.3`, no longer padded to 10 decimals.
+- `AttributeValue::count()` includes the terminating NUL for strings.
+
+## sumaru migration checklist (you're doing this separately) ⬜
+
+What sumaru can now replace, and what to keep in sumaru's adapters:
+
+- [ ] `src/volume.rs` → `afni_io::volume::read_any`. Map `Volume::frame_f32(0)` → `Volume.data`, `ijk_to_ras()` → `VolumeSpace` (as `f32`), and `AfniPaths::is_afni_name` for the "is this AFNI?" check. Keep in sumaru: NaN/Inf → 0 and RGB → luminance (`0.299 R + 0.587 G + 0.114 B`). afni-io returns raw values and `None` for RGB on purpose
+- [ ] sumaru only read `BRICK_TYPES[0]`/`BRICK_FLOAT_FACS[0]`. With afni-io, mixed-datum datasets and per-sub-brick factors work, and negative factors apply (sumaru ignored them)
+- [ ] Remove the `nifti` dependency (pulls in nalgebra/ndarray). Check `flate2` is still needed (`niml_debug.rs`)
+- [ ] Later phases: GIfTI (Phase 7, drops `gifti-rs`), NIML/dset/ROI (Phases 5–6), spec/FreeSurfer/STC/tract/graph (Phase 8), talk protocol (Phase 9)
 
 ## Phase 5 — NIML core parity ⬜
 
@@ -147,6 +167,7 @@ Brief tasks 5–6.
 
 - [ ] FreeSurfer annot/curv/label/MGH, `.1D.dset` and `[]{}` selectors
 - [ ] PLY, SureFit/1D `.coord`/`.topo`, BYU, BrainVoyager `.srf`, MNI `.obj`, STL; GIfTI `ExternalFileBinary`
+- [ ] NIfTI complex and RGB datatypes (see the Phase 4 log); streaming / single-volume NIfTI reads
 
 ---
 
@@ -155,6 +176,33 @@ Brief tasks 5–6.
 Newest first. Record anything about AFNI, SUMA or sumaru behaviour that
 affects the design, with the phase it was found in.
 
+- **2026-10-02 · Phase 4.** **Bug fixed, every writer:** floats were written
+  with a fixed 10 decimals. A scale factor such as 3.0517578e-05 (1/32768,
+  common for scaled shorts) became 0.0000305176, rescaling every voxel after
+  a read/write, and values below 1e-10 (small p-values) became 0. Now each
+  value is written as the shortest decimal that reads back to the same number:
+  `f32`'s shortest form for values that are exact `f32`s (all AFNI floats),
+  `f64`'s otherwise. This affects `.HEAD`, NIML, GIfTI ASCII, `.1D`, `.asc` and
+  ROI colours.
+- **2026-10-02 · Phase 4.** **Bug fixed:** `.HEAD` string attributes were
+  written with an extra `~` that `count` didn't include (`'abc~~` with
+  count 4). A string set in code without a trailing NUL got no terminator at
+  all. Now, as AFNI's `THD_write_atr` does, the terminating NUL is always
+  counted and written as `~`.
+- **2026-10-02 · Phase 4.** AFNI's `BRICK_STATS` for RGB is the luminance
+  range (`0 194.02` for the RGB fixture), and for scaled shorts the scaled
+  range (AFNI prints ~7 significant digits: 67.87499).
+- **2026-10-02 · Phase 4.** AFNI's NIfTI reader prefers the sform over the
+  qform by default (`form_priority = 'S'`, overridable with
+  `AFNI_NIFTI_PRIORITY`), the same as `NiftiHeader::affine()`. It applies a
+  statistical `intent_code` to every sub-brick, but not when `dim[5] > 1`
+  (per-voxel parameters), and the AFNI extension then overrides it
+  (`thd_niftiread.c`). It only understands stat codes up to 10 from the
+  intent.
+- **2026-10-02 · Phase 4.** **Gap:** the NIfTI reader has no complex (32,
+  1792, 2048) or RGB (128, 2304) datatypes; `TypedArray` covers 8–64-bit ints
+  and floats only. sumaru's `nifti`-crate path (`into_ndarray::<f32>`) can't
+  read them either, so this isn't a regression. Added to Phase 10.
 - **2026-10-02 · Phase 3.** **sumaru bug, fixed in sumaru.** sumaru's NIML
   writer (`src/io/niml.rs`) wrote `String` bodies unquoted, so AFNI read only
   the first word. `3dNotes` showed sumaru's cluster history as just
