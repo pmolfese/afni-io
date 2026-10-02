@@ -155,14 +155,24 @@ Brief tasks 5–6.
 Newest first. Record anything about AFNI, SUMA or sumaru behaviour that
 affects the design, with the phase it was found in.
 
-- **2026-10-02 · Phase 3.** **sumaru bug, live:** sumaru's NIML writer
-  (`io/niml.rs`, the `NimlData::Text` arm of its serializer) writes `String`
-  bodies unquoted, so AFNI reads only the first word. In sumaru's own cluster
-  output (`tests/data/real/dset/test_lh_full_sumaru_clusters.niml.dset`),
-  `3dNotes` shows the history as just `SurfClust`, losing the rest of the
-  command line. Multi-word column labels lose everything after the first blank
-  and shift later columns to `#n`. afni-io had the same bug, now fixed; sumaru
-  needs the same one-line fix (or the move to afni-io).
+- **2026-10-02 · Phase 3.** **sumaru bug, fixed in sumaru.** sumaru's NIML
+  writer (`src/io/niml.rs`) wrote `String` bodies unquoted, so AFNI read only
+  the first word. `3dNotes` showed sumaru's cluster history as just
+  `SurfClust`, and multi-word column labels were cut at the first blank,
+  pushing later columns to `#n`. Fixed in sumaru: `String`/`CString` bodies
+  are quoted on write, quoted bodies are split before entities are decoded,
+  and `&#ddd;`/`&#xhh;` are decoded. Checked with `3dinfo -label` and
+  `3dNotes` on sumaru output. Both readers (sumaru's and afni-io's) still read
+  an **unquoted** body as one whole string, so older sumaru files keep their
+  full history (strict AFNI parsing would keep only the first word). The
+  `real/dset` sumaru cluster fixture now tests this in afni-io.
+- **2026-10-02 · Phase 3.** **sumaru quirk, not fixed:**
+  `strip_niml_comment_prefixes` (`sumaru/src/io/niml.rs`) removes a leading
+  `# ` from *every line* of a NIML file before parsing, so it can read SUMA's
+  comment-wrapped `.niml.roi` files. It also alters string content: the
+  `# note: …` line in sumaru's cluster history comes back as `note: …`. afni-io
+  handles comment-wrapped ROIs without this pass. Resolve this when sumaru's
+  NIML reading moves onto afni-io (Phase 5).
 - **2026-10-02 · Phase 3.** AFNI stat codes **are** NIfTI intent codes (2 =
   Correl … 24 = Log10Pval; `niml_stat.c`). But AFNI's `.HEAD` loader keeps
   only the classic codes 2–10 (`FUNC_IS_STAT`) and ignores e.g. `Normal`; the

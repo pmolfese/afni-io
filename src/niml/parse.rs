@@ -255,7 +255,20 @@ fn parse_body(attrs: &BTreeMap<String, String>, body: &[u8]) -> Result<NimlData>
 /// `"` or `'` (up to the matching quote) or a run of non-blank characters.
 /// Entities are decoded after splitting, so an escaped quote never ends a
 /// string early. An unterminated quote runs to the end of the body.
+///
+/// A body that does not start with a quote is kept whole as one string.
+/// sumaru wrote multi-word strings unquoted before October 2026 (e.g. its
+/// `HISTORY_NOTE`); AFNI would read only their first word, but those files
+/// should still read completely.
 fn split_strings(body: &str) -> Vec<String> {
+    let body = body.trim();
+    if !body.starts_with(['"', '\'']) {
+        return if body.is_empty() {
+            Vec::new()
+        } else {
+            vec![unescape(body)]
+        };
+    }
     let bytes = body.as_bytes();
     let mut out = Vec::new();
     let mut pos = 0;

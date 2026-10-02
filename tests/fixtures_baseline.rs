@@ -212,4 +212,10 @@ fn real_rois_and_label_tables_parse() {
     ))
     .unwrap();
     assert!(clusters.is_sparse());
+    // Written by sumaru before it quoted String bodies: the unquoted,
+    // multi-line history must still read whole.
+    let history = clusters.history.as_deref().unwrap();
+    assert!(history.starts_with("SurfClust -i "), "{history}");
+    assert!(history.contains("-out_fulllist"), "{history}");
+    assert_eq!(clusters.labels, ["Cluster"]);
 }
