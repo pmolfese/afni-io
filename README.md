@@ -13,7 +13,7 @@ code); the only dependencies are
 
 | Module | Format | Extensions | Read | Write |
 |--------|--------|-----------|:----:|:-----:|
-| `niml` | Generic NIML element trees (ASCII + binary) | `.niml`, `.niml.asc` | ✅ | ✅ (ASCII) |
+| `niml` | Generic NIML element trees (ASCII, binary, base64), including streams | `.niml`, `.niml.asc` | ✅ | ✅ |
 | `dset` | Surface datasets (`AFNI_dataset`) | `.niml.dset` | ✅ | ✅ |
 | `roi`  | Drawn surface ROIs (`Node_ROI`) | `.niml.roi` | ✅ | ✅ |
 | `brik` | AFNI volume datasets (`.HEAD`/`.BRIK` pair), all 8 datum types | `.HEAD` + `.BRIK`/`.BRIK.gz` | ✅ | ✅ |
@@ -41,6 +41,14 @@ is also read.
 way. You get the grid, the number of volumes, the `ijk -> RAS` matrix, each
 volume as scaled `f32`, and labels and statistics (from the `.HEAD` or the
 NIfTI's AFNI extension).
+
+**NIML** (`niml`): numeric columns are stored in their declared type
+(`byte`/`short`/`int`/`float`/`double`), so a `float` dataset takes half the
+memory it would as `f64`. Variable-length records (drawn-ROI strokes, tracts)
+are read and written in ASCII and binary. `serialize_binary` writes the
+`binary.lsbfirst` form AFNI and SUMA use for large data, and `parse_stream`
+parses a stream that is still arriving (e.g. from an AFNI or SUMA socket).
+It returns the complete elements plus the number of bytes they used.
 
 **Geometry** (`geometry`, plus methods on `head::Header`): the voxel-to-world
 matrix in AFNI's DICOM/RAI convention (`ijk_to_dicom`, using

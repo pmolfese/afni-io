@@ -95,6 +95,11 @@ impl DataType {
     }
 
     /// The number of bytes per element.
+    /// Whether this is a floating-point type.
+    pub fn is_float(self) -> bool {
+        matches!(self, Self::Float32 | Self::Float64)
+    }
+
     pub fn elem_size(self) -> usize {
         match self {
             Self::UInt8 | Self::Int8 => 1,

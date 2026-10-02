@@ -19,13 +19,14 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::array::{DataType, TypedArray};
 use crate::error::{self, Error, Result};
 
 mod parse;
 mod write;
 
-pub use parse::parse_bytes;
-pub use write::serialize;
+pub use parse::{parse_bytes, parse_stream};
+pub use write::{serialize, serialize_binary};
 
 /// A single NIML element: a tag, its attributes, and its body.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,27 +47,54 @@ pub enum NimlData {
     None,
     /// Free text (a single `String`/`CString` column, or untyped text).
     Text(String),
-    /// A homogeneous numeric matrix (`rows` x columns of `f64`).
+    /// A numeric matrix, one typed column per `ni_type` entry.
     Numeric(NumericMatrix),
     /// A heterogeneous table mixing text and numeric columns.
     Mixed(MixedTable),
+    /// Variable-length records of a NIML rowtype such as
+    /// `SUMA_NIML_ROI_DATUM` or `TAYLOR_TRACT_DATUM`.
+    Records(RecordTable),
     /// Child elements (`ni_form="ni_group"`).
     Group(Vec<NimlElement>),
 }
 
-/// A row-major numeric matrix decoded from a NIML element body.
-///
-/// All values are widened to `f64` regardless of their declared
-/// [`NimlValueType`]; the original per-column types are kept in
-/// [`column_types`](NumericMatrix::column_types) so writers can round-trip them.
+/// A numeric matrix decoded from a NIML element body, stored column by
+/// column in each column's declared type (`byte`, `short`, `int`, `float`,
+/// `double`). A `float` dataset therefore takes half the memory it would as
+/// `f64`, and a column can be handed on without copying.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NumericMatrix {
-    /// The declared type of each column.
-    pub column_types: Vec<NimlValueType>,
     /// Number of rows.
     pub rows: usize,
-    /// `rows * column_types.len()` values, stored row-major.
-    pub values: Vec<f64>,
+    /// One array of `rows` values per column.
+    pub columns: Vec<TypedArray>,
+}
+
+/// One field of a NIML rowtype: a number, or a variable-length array of
+/// numbers whose length is stored in an earlier field of the same record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordField {
+    /// The numeric type of the field's values.
+    pub ty: DataType,
+    /// `None` for a single value. `Some(k)` for an array whose length is the
+    /// value of field `k` (0-based) of the same record: AFNI's `type[#k+1]`.
+    pub length_from: Option<usize>,
+}
+
+/// Records of a NIML rowtype with variable-length fields, such as drawn-ROI
+/// strokes (`SUMA_NIML_ROI_DATUM` = `int,int,int,int[#3]`) or tracts
+/// (`TAYLOR_TRACT_DATUM` = `int,int,float[#2]`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordTable {
+    /// The rowtype, as named in `ni_type`.
+    pub record_type: NimlValueType,
+    /// `rows[r][f]` holds field `f` of record `r`: one value for a scalar
+    /// field, the whole array for a variable-length one. Values are `f64`,
+    /// which holds every `int` and `float` exactly.
+    ///
+    /// When written, a length field is set from its array, so it never needs
+    /// to be kept in step by hand.
+    pub rows: Vec<Vec<Vec<f64>>>,
 }
 
 /// A table with a mix of numeric and string columns.
@@ -110,6 +138,8 @@ pub enum NimlValueType {
     CString,
     /// A variable-length drawn-ROI datum record (`SUMA_NIML_ROI_DATUM`).
     SumaRoiDatum,
+    /// A variable-length tract record (`TAYLOR_TRACT_DATUM`, AFNI/FATCAT).
+    TaylorTractDatum,
     /// Any other type name, preserved verbatim.
     Other(String),
 }
@@ -126,6 +156,7 @@ impl NimlValueType {
             "string" => Self::String,
             "cstring" => Self::CString,
             "suma_niml_roi_datum" => Self::SumaRoiDatum,
+            "taylor_tract_datum" => Self::TaylorTractDatum,
             _ => Self::Other(name.trim().to_string()),
         }
     }
@@ -141,6 +172,7 @@ impl NimlValueType {
             Self::String => "String",
             Self::CString => "CString",
             Self::SumaRoiDatum => "SUMA_NIML_ROI_DATUM",
+            Self::TaylorTractDatum => "TAYLOR_TRACT_DATUM",
             Self::Other(value) => value,
         }
     }
@@ -156,6 +188,63 @@ impl NimlValueType {
     /// Whether this type holds an integer.
     pub fn is_integer(&self) -> bool {
         matches!(self, Self::UInt8 | Self::Int16 | Self::Int32)
+    }
+
+    /// The array type that stores this NIML type's values, for the numeric
+    /// types.
+    pub fn data_type(&self) -> Option<DataType> {
+        Some(match self {
+            Self::UInt8 => DataType::UInt8,
+            Self::Int16 => DataType::Int16,
+            Self::Int32 => DataType::Int32,
+            Self::Float32 => DataType::Float32,
+            Self::Float64 => DataType::Float64,
+            _ => return None,
+        })
+    }
+
+    /// The NIML type for an array type, if NIML has one (`byte`, `short`,
+    /// `int`, `float`, `double`).
+    pub fn from_data_type(dtype: DataType) -> Option<Self> {
+        Some(match dtype {
+            DataType::UInt8 => Self::UInt8,
+            DataType::Int16 => Self::Int16,
+            DataType::Int32 => Self::Int32,
+            DataType::Float32 => Self::Float32,
+            DataType::Float64 => Self::Float64,
+            _ => return None,
+        })
+    }
+
+    /// The fields of a variable-length rowtype, for the ones AFNI defines
+    /// with `NI_rowtype_define`: `SUMA_NIML_ROI_DATUM` is
+    /// `int,int,int,int[#3]` (`SUMA_niml.c`) and `TAYLOR_TRACT_DATUM` is
+    /// `int,int,float[#2]` (`ptaylor/TrackIO.h`).
+    pub fn record_fields(&self) -> Option<Vec<RecordField>> {
+        let scalar = |ty| RecordField {
+            ty,
+            length_from: None,
+        };
+        Some(match self {
+            Self::SumaRoiDatum => vec![
+                scalar(DataType::Int32),
+                scalar(DataType::Int32),
+                scalar(DataType::Int32),
+                RecordField {
+                    ty: DataType::Int32,
+                    length_from: Some(2),
+                },
+            ],
+            Self::TaylorTractDatum => vec![
+                scalar(DataType::Int32),
+                scalar(DataType::Int32),
+                RecordField {
+                    ty: DataType::Float32,
+                    length_from: Some(1),
+                },
+            ],
+            _ => return None,
+        })
     }
 
     /// The fixed byte width of a numeric type, if it has one.
@@ -174,36 +263,117 @@ impl NimlValueType {
 }
 
 impl NumericMatrix {
-    /// Construct a matrix, validating that `values.len() == rows * columns`.
+    /// Build a matrix from row-major `f64` values, storing each column in its
+    /// declared type (values are cast, as AFNI casts on input).
     pub fn new(column_types: Vec<NimlValueType>, rows: usize, values: Vec<f64>) -> Result<Self> {
         if column_types.is_empty() {
             return Err(Error::invalid("NIML numeric matrix has no columns"));
         }
-        let expected = rows * column_types.len();
-        if values.len() != expected {
+        let ncols = column_types.len();
+        if values.len() != rows * ncols {
             return Err(Error::invalid(format!(
-                "NIML numeric matrix has {} values but expected {expected}",
-                values.len()
+                "NIML numeric matrix has {} values but expected {}",
+                values.len(),
+                rows * ncols
             )));
         }
-        Ok(Self {
-            column_types,
-            rows,
-            values,
-        })
+        let columns = column_types
+            .iter()
+            .enumerate()
+            .map(|(c, ty)| {
+                let dtype = ty.data_type().ok_or_else(|| {
+                    Error::invalid(format!("NIML type {} is not numeric", ty.canonical_name()))
+                })?;
+                Ok(typed_from_f64(
+                    dtype,
+                    (0..rows).map(|r| values[r * ncols + c]),
+                ))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self { rows, columns })
+    }
+
+    /// Build a matrix from columns of equal length, each of a type NIML can
+    /// store (`byte`, `short`, `int`, `float`, `double`).
+    pub fn from_columns(columns: Vec<TypedArray>) -> Result<Self> {
+        let rows = columns
+            .first()
+            .ok_or_else(|| Error::invalid("NIML numeric matrix has no columns"))?
+            .len();
+        for (c, column) in columns.iter().enumerate() {
+            if column.len() != rows {
+                return Err(Error::invalid(format!(
+                    "NIML column {c} has {} values but column 0 has {rows}",
+                    column.len()
+                )));
+            }
+            if NimlValueType::from_data_type(column.dtype()).is_none() {
+                return Err(Error::invalid(format!(
+                    "NIML has no type for {:?} (column {c})",
+                    column.dtype()
+                )));
+            }
+        }
+        Ok(Self { rows, columns })
     }
 
     /// Number of columns.
-    pub fn columns(&self) -> usize {
-        self.column_types.len()
+    pub fn column_count(&self) -> usize {
+        self.columns.len()
     }
 
-    /// Fetch the value at `(row, column)`, if in bounds.
+    /// The NIML type of each column.
+    pub fn column_types(&self) -> Vec<NimlValueType> {
+        self.columns
+            .iter()
+            .map(|c| NimlValueType::from_data_type(c.dtype()).expect("checked on construction"))
+            .collect()
+    }
+
+    /// Column `column`, if it exists.
+    pub fn column(&self, column: usize) -> Option<&TypedArray> {
+        self.columns.get(column)
+    }
+
+    /// The value at `(row, column)` as `f64`, if in bounds.
     pub fn get(&self, row: usize, column: usize) -> Option<f64> {
-        if row >= self.rows || column >= self.columns() {
-            return None;
+        self.columns.get(column)?.get_f64(row)
+    }
+}
+
+/// Collect `f64` values into an array of `dtype`, casting each one.
+pub(crate) fn typed_from_f64(dtype: DataType, values: impl Iterator<Item = f64>) -> TypedArray {
+    match dtype {
+        DataType::UInt8 => TypedArray::UInt8(values.map(|v| v as u8).collect()),
+        DataType::Int8 => TypedArray::Int8(values.map(|v| v as i8).collect()),
+        DataType::UInt16 => TypedArray::UInt16(values.map(|v| v as u16).collect()),
+        DataType::Int16 => TypedArray::Int16(values.map(|v| v as i16).collect()),
+        DataType::UInt32 => TypedArray::UInt32(values.map(|v| v as u32).collect()),
+        DataType::Int32 => TypedArray::Int32(values.map(|v| v as i32).collect()),
+        DataType::UInt64 => TypedArray::UInt64(values.map(|v| v as u64).collect()),
+        DataType::Int64 => TypedArray::Int64(values.map(|v| v as i64).collect()),
+        DataType::Float32 => TypedArray::Float32(values.map(|v| v as f32).collect()),
+        DataType::Float64 => TypedArray::Float64(values.collect()),
+    }
+}
+
+impl RecordTable {
+    /// The rowtype's field layout.
+    pub fn fields(&self) -> Vec<RecordField> {
+        self.record_type.record_fields().unwrap_or_default()
+    }
+
+    /// Record `r` with every length field set from its array, as written.
+    pub(crate) fn normalized_row(&self, r: usize) -> Vec<Vec<f64>> {
+        let mut row = self.rows[r].clone();
+        for (f, field) in self.fields().iter().enumerate() {
+            if let (Some(k), Some(len)) = (field.length_from, row.get(f).map(Vec::len)) {
+                if let Some(count) = row.get_mut(k) {
+                    *count = vec![len as f64];
+                }
+            }
         }
-        self.values.get(row * self.columns() + column).copied()
+        row
     }
 }
 
@@ -232,16 +402,16 @@ impl MixedTable {
     }
 
     /// Number of columns.
-    pub fn columns(&self) -> usize {
+    pub fn column_count(&self) -> usize {
         self.column_types.len()
     }
 
     /// Fetch a cell, if in bounds.
     pub fn get(&self, row: usize, column: usize) -> Option<&NimlValue> {
-        if row >= self.rows || column >= self.columns() {
+        if row >= self.rows || column >= self.column_count() {
             return None;
         }
-        self.values.get(row * self.columns() + column)
+        self.values.get(row * self.column_count() + column)
     }
 }
 
@@ -331,13 +501,22 @@ pub fn expand_ni_type(ni_type: &str) -> Result<Vec<NimlValueType>> {
     Ok(types)
 }
 
-/// Render a slice of column types as a canonical `ni_type` string.
+/// Render a slice of column types as an `ni_type` string, grouping runs of
+/// the same type as `N*type` the way AFNI writes them (e.g. `int,3*float`).
 pub fn ni_type_string(types: &[NimlValueType]) -> String {
-    types
-        .iter()
-        .map(NimlValueType::canonical_name)
-        .collect::<Vec<_>>()
-        .join(",")
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i < types.len() {
+        let run = types[i..].iter().take_while(|t| **t == types[i]).count();
+        let name = types[i].canonical_name();
+        parts.push(if run > 1 {
+            format!("{run}*{name}")
+        } else {
+            name.to_string()
+        });
+        i += run;
+    }
+    parts.join(",")
 }
 
 /// Parse every top-level element from raw NIML bytes (ASCII or binary).
@@ -371,6 +550,12 @@ pub fn read(path: impl AsRef<Path>) -> Result<Vec<NimlElement>> {
 /// Serialise elements to ASCII and write them to disk.
 pub fn write(path: impl AsRef<Path>, elements: &[NimlElement]) -> Result<()> {
     error::write_file(path.as_ref(), serialize(elements).as_bytes())
+}
+
+/// Serialise elements with binary numeric and record bodies
+/// ([`serialize_binary`]) and write them to disk.
+pub fn write_binary(path: impl AsRef<Path>, elements: &[NimlElement]) -> Result<()> {
+    error::write_file(path.as_ref(), &serialize_binary(elements))
 }
 
 /// Remove a leading `# ` (or `#`) from each line.
@@ -489,7 +674,7 @@ mod tests {
     #[test]
     fn round_trips_a_numeric_group() {
         let text = r#"<AFNI_dataset ni_form="ni_group" dset_type="Node_Bucket" >
-<SPARSE_DATA ni_type="float,float" ni_dimen="2" >
+<SPARSE_DATA ni_type="2*float" ni_dimen="2" >
 1.5 2.5
 3.5 4.5
 </SPARSE_DATA>
@@ -525,6 +710,38 @@ mod tests {
             panic!("expected text");
         };
         assert_eq!(text, "hello <world>");
+    }
+
+    #[test]
+    fn binary_byte_order_and_base64_follow_niml_elemio() {
+        // A bare "binary" is big-endian, as in AFNI (default NI_MSB_FIRST).
+        let mut bytes = b"<a ni_type=\"int\" ni_dimen=\"1\" ni_form=\"binary\" >".to_vec();
+        bytes.extend_from_slice(&258i32.to_be_bytes());
+        bytes.extend_from_slice(b"</a>");
+        let elements = parse(&bytes).unwrap();
+        let NimlData::Numeric(m) = &elements[0].data else {
+            panic!()
+        };
+        assert_eq!(m.get(0, 0), Some(258.0));
+
+        // base64.lsbfirst: two little-endian floats.
+        let payload = [1.5f32.to_le_bytes(), (-2.0f32).to_le_bytes()].concat();
+        let text = format!(
+            "<a ni_type=\"float\" ni_dimen=\"2\" ni_form=\"base64.lsbfirst\" >\n{}\n</a>",
+            crate::base64::encode(&payload)
+        );
+        let elements = parse_str(&text).unwrap();
+        let NimlData::Numeric(m) = &elements[0].data else {
+            panic!()
+        };
+        assert_eq!((m.get(0, 0), m.get(1, 0)), (Some(1.5), Some(-2.0)));
+    }
+
+    #[test]
+    fn ni_type_strings_group_repeats_like_afni() {
+        let types = expand_ni_type("int,3*float,String,2*float").unwrap();
+        assert_eq!(ni_type_string(&types), "int,3*float,String,2*float");
+        assert_eq!(ni_type_string(&[NimlValueType::Float32]), "float");
     }
 
     #[test]

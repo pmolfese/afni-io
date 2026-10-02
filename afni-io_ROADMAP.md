@@ -16,7 +16,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 | 2 | Geometry | ✅ |
 | 3 | Stat metadata and the NIfTI AFNI extension | ✅ |
 | 4 | BRIK writing, `read_any`, housekeeping | ✅ |
-| 5 | NIML core parity | ⬜ |
+| 5 | NIML core parity | ✅ |
 | 6 | `.niml.dset` / ROI parity | ⬜ |
 | 7 | GIfTI swap in sumaru | ⬜ |
 | 8 | Remaining formats | ⬜ |
@@ -129,17 +129,29 @@ What sumaru can now replace, and what to keep in sumaru's adapters:
 - [ ] `src/volume.rs` → `afni_io::volume::read_any`. Map `Volume::frame_f32(0)` → `Volume.data`, `ijk_to_ras()` → `VolumeSpace` (as `f32`), and `AfniPaths::is_afni_name` for the "is this AFNI?" check. Keep in sumaru: NaN/Inf → 0 and RGB → luminance (`0.299 R + 0.587 G + 0.114 B`). afni-io returns raw values and `None` for RGB on purpose
 - [ ] sumaru only read `BRICK_TYPES[0]`/`BRICK_FLOAT_FACS[0]`. With afni-io, mixed-datum datasets and per-sub-brick factors work, and negative factors apply (sumaru ignored them)
 - [ ] Remove the `nifti` dependency (pulls in nalgebra/ndarray). Check `flate2` is still needed (`niml_debug.rs`)
-- [ ] Later phases: GIfTI (Phase 7, drops `gifti-rs`), NIML/dset/ROI (Phases 5–6), spec/FreeSurfer/STC/tract/graph (Phase 8), talk protocol (Phase 9)
+- [ ] NIML (after Phase 6): sumaru → afni-io names are `NimlNumericMatrix` → `NumericMatrix` (typed columns; `column_count`, `get`), `NimlMixedTable` → `MixedTable`, `NimlData::RoiDatums`/`TractDatums` → `NimlData::Records`, `parse_niml_bytes` → `niml::parse_bytes`, `serialize_niml_ascii` → `niml::serialize`, `serialize_niml_binary` → `niml::serialize_binary`, `expand_niml_type` → `niml::expand_ni_type`. The talk reader's parse-and-retry loop and `expected_binary_niml_message_len` (`afni.rs`) can become `niml::parse_stream`
+- [ ] sumaru's NIML reader treats `ni_form="binary"` as host byte order; AFNI means big-endian (see Phase 5 log)
+- [ ] Later phases: GIfTI (Phase 7, drops `gifti-rs`), dset/ROI (Phase 6), spec/FreeSurfer/STC/tract/graph (Phase 8), talk protocol (Phase 9)
 
-## Phase 5 — NIML core parity ⬜
+## Phase 5 — NIML core parity ✅
 
-- [ ] Binary NIML writer
-- [ ] Variable-length records (`SUMA_NIML_ROI_DATUM`, `TAYLOR_TRACT_DATUM`) in both ASCII and binary
-- [x] Attributes with no value, and single-quoted or unquoted values (done in Phase 1)
-- [x] `String` bodies: split before decoding, quoted on write, numeric entities (done in Phase 3)
-- [ ] Incremental parsing (`Incomplete` vs. `(elements, consumed)`), replacing sumaru's retry loop
-- [ ] Decide whether numeric matrices stay `f64` or become typed columns (this breaks the public API)
-- [ ] Settle the naming differences with sumaru (`NumericMatrix`/`NimlNumericMatrix`, `columns`/`column_count`)
+- [x] **Typed columns (decision: yes, breaking).** `NumericMatrix { rows, columns: Vec<TypedArray> }`, so each column keeps its declared type. A `float` dataset takes half the memory: a 163,842-node × 300-column float dset is 197 MB instead of 393 MB. `new(types, rows, row-major f64)` is kept as a convenience constructor; `from_columns`, `column`, `column_types`, `get` added
+- [x] **Variable-length records, generic:** `NimlData::Records(RecordTable)`, driven by AFNI's rowtype definitions (`NimlValueType::record_fields`): `SUMA_NIML_ROI_DATUM` = `int,int,int,int[#3]`, `TAYLOR_TRACT_DATUM` = `int,int,float[#2]`. ASCII and binary, read and write. Writers set each length field from its array, so callers can't get it wrong. `roi.rs` now uses it
+- [x] **Binary writer:** `niml::serialize_binary` / `niml::write_binary` (`binary.lsbfirst` for numeric and record bodies; groups, text and mixed stay ASCII in the same stream, which AFNI allows)
+- [x] **Incremental parsing:** `niml::parse_stream(bytes) -> (elements, consumed)`. Partial elements are left for later; malformed input is an error; processing instructions are skipped. Tested byte by byte and in chunks against a one-shot parse of a mixed ASCII/binary stream
+- [x] **Naming:** `column_count()` (sumaru's name) replaces `columns()` on `NumericMatrix` and `MixedTable`. The full sumaru → afni-io name map is in the migration checklist
+- [x] `ni_type` written the way AFNI writes it, with repeats grouped (`3*float`, not `float,float,float`)
+- [x] `base64` bodies (`ni_form="base64.*"`) are read
+- [x] Fixed: AFNI's byte-order rule (bare `binary` is big-endian; see log) and a stale-`ni_form` bug in the writer (see log)
+- [x] **Checked against AFNI:** binary dsets written by afni-io read in `ConvertDset` identically to AFNI's own dumps (dense and sparse), keep their stat codes in `3dinfo`, and binary ROI files convert through `ROI2dataset` row-for-row identically to the originals
+- [x] Test: every committed NIML fixture (AFNI dsets, SUMA/sumaru ROIs, label tables, the cluster dset) round-trips through binary and back through ASCII
+
+Public API changes:
+- `NumericMatrix` fields are now `rows` and `columns`; `column_types()` is a method; `values` is gone (use `get` / `column`).
+- `NumericMatrix::columns()` and `MixedTable::columns()` are now `column_count()`.
+- `NimlData::Records` is new; ROI bodies are `Records`, no longer `Text`.
+- `NimlValueType::TaylorTractDatum` is new.
+- `ni_type_string` groups repeats.
 
 ## Phase 6 — `.niml.dset` / ROI parity ⬜
 
@@ -176,6 +188,34 @@ What sumaru can now replace, and what to keep in sumaru's adapters:
 Newest first. Record anything about AFNI, SUMA or sumaru behaviour that
 affects the design, with the phase it was found in.
 
+- **2026-10-02 · Phase 5.** **Bug fixed, byte order:** AFNI decides a binary
+  body's byte order by substring and **defaults to big-endian** unless
+  `ni_form` contains `lsb` (`niml_elemio.c`: `order=NI_MSB_FIRST`). afni-io
+  (and sumaru) read a bare `ni_form="binary"` as the host's order, which is
+  little-endian on Intel and Apple Silicon, so the opposite of AFNI. AFNI itself always
+  writes `binary.lsbfirst`/`.msbfirst`, so this only bites on hand-made or
+  third-party files.
+- **2026-10-02 · Phase 5.** **Bug fixed, writer:** serialising an element that
+  had been parsed from binary kept its `ni_form="binary.lsbfirst"` attribute
+  but wrote an ASCII body, so the output could not be read back. The writer
+  now drops any incoming `ni_form` and sets its own.
+- **2026-10-02 · Phase 5.** AFNI's variable-length rowtypes are defined at run
+  time with `NI_rowtype_define`: `SUMA_NIML_ROI_DATUM` = `int,int,int,int[#3]`
+  (`SUMA_niml.c`) and `TAYLOR_TRACT_DATUM` = `int,int,float[#2]`
+  (`ptaylor/TrackIO.h`). `type[#k]` means "an array whose length is field k
+  (1-based)". A file only names the rowtype in `ni_type`, so a reader must
+  already know the definitions. Binary bodies have no length prefix: the
+  only way to find where a record body ends is to walk the records.
+- **2026-10-02 · Phase 5.** AFNI writes grouped `ni_type`s (`3*float`,
+  `2*String`); our writer used to spell them out. Equivalent, but AFNI's form
+  keeps headers short for wide datasets.
+- **2026-10-02 · Phase 5.** `parse_stream` can't tell an element whose closing
+  tag never comes from one still arriving (`<a>text</b>` might be followed by
+  `</a>`). Talk readers must cap their buffer.
+- **2026-10-02 · Phase 5.** `ni_form="base64.*"` exists (AFNI's `nisurf`
+  writes it). It is read here; nothing writes it, since AFNI programs use
+  binary. AFNI's `ROI2dataset` reads binary `Node_ROI` files fine, though SUMA
+  always writes ROIs as ASCII.
 - **2026-10-02 · Phase 4.** **Bug fixed, every writer:** floats were written
   with a fixed 10 decimals. A scale factor such as 3.0517578e-05 (1/32768,
   common for scaled shorts) became 0.0000305176, rescaling every voxel after
@@ -218,9 +258,11 @@ affects the design, with the phase it was found in.
   `strip_niml_comment_prefixes` (`sumaru/src/io/niml.rs`) removes a leading
   `# ` from *every line* of a NIML file before parsing, so it can read SUMA's
   comment-wrapped `.niml.roi` files. It also alters string content: the
-  `# note: …` line in sumaru's cluster history comes back as `note: …`. afni-io
-  handles comment-wrapped ROIs without this pass. Resolve this when sumaru's
-  NIML reading moves onto afni-io (Phase 5).
+  `# note: …` line in sumaru's cluster history comes back as `note: …`.
+  *(Corrected in Phase 5: afni-io has a similar pass, `strip_comment_prefixes`
+  in `niml::parse`, but it runs only when a line starts with `# <`, i.e. on
+  comment-wrapped files. It still edits the whole file when it does run.)*
+  Resolve this when sumaru's NIML reading moves onto afni-io.
 - **2026-10-02 · Phase 3.** AFNI stat codes **are** NIfTI intent codes (2 =
   Correl … 24 = Log10Pval; `niml_stat.c`). But AFNI's `.HEAD` loader keeps
   only the classic codes 2–10 (`FUNC_IS_STAT`) and ignores e.g. `Normal`; the

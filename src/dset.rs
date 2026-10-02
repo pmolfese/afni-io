@@ -142,7 +142,7 @@ impl NimlDataset {
 
     /// Number of sub-bricks (columns in `SPARSE_DATA`).
     pub fn columns(&self) -> usize {
-        self.data.columns()
+        self.data.column_count()
     }
 
     /// Whether the dataset carries an explicit node index list.
@@ -316,7 +316,7 @@ mod tests {
         let serialized = dset.to_niml_string().unwrap();
         let reparsed = NimlDataset::from_bytes(serialized.as_bytes()).unwrap();
         assert_eq!(reparsed.node_indices, Some(vec![10, 12]));
-        assert_eq!(reparsed.data.values, vec![1.5, 2.5, 3.5, 4.5]);
+        assert_eq!(reparsed.data, dset.data);
         assert_eq!(reparsed.labels, vec!["effect", "stat"]);
     }
 }

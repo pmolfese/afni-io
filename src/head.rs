@@ -29,9 +29,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::array::TypedArray;
 use crate::error::{self, from_utf8, Error, Result};
 use crate::geometry::{Mat44, Orientation, TimeAxis, TimeUnits, View};
-use crate::niml::{NimlData, NimlElement, NimlValue, NimlValueType, NumericMatrix};
+use crate::niml::{NimlData, NimlElement, NimlValue, NumericMatrix};
 use crate::stat::{parse_statsym_list, StatKind, StatSpec, ThresholdCurve};
 
 /// The value array of a single header [`Attribute`].
@@ -551,16 +552,19 @@ impl Header {
                     continue;
                 };
                 let value = match &child.data {
-                    NimlData::Numeric(m) if m.columns() == 1 && m.rows > 0 => {
-                        if m.column_types[0].is_integer() {
-                            AttributeValue::Int(m.values.iter().map(|&v| v as i64).collect())
+                    NimlData::Numeric(m) if m.column_count() == 1 && m.rows > 0 => {
+                        let column = &m.columns[0];
+                        if column.dtype().is_float() {
+                            AttributeValue::Float(column.to_f64_vec())
                         } else {
-                            AttributeValue::Float(m.values.clone())
+                            AttributeValue::Int(
+                                column.to_f64_vec().iter().map(|&v| v as i64).collect(),
+                            )
                         }
                     }
                     NimlData::Text(text) => AttributeValue::String(decode_string(text) + "\0"),
                     NimlData::Mixed(t)
-                        if t.columns() == 1
+                        if t.column_count() == 1
                             && t.rows > 0
                             && t.values.iter().all(|v| matches!(v, NimlValue::Text(_))) =>
                     {
@@ -608,14 +612,12 @@ impl Header {
                 attrs.insert("atr_name".to_string(), attr.name.clone());
                 let data = match &attr.value {
                     AttributeValue::Int(v) => NimlData::Numeric(NumericMatrix {
-                        column_types: vec![NimlValueType::Int32],
                         rows: v.len(),
-                        values: v.iter().map(|&x| x as f64).collect(),
+                        columns: vec![TypedArray::Int32(v.iter().map(|&x| x as i32).collect())],
                     }),
                     AttributeValue::Float(v) => NimlData::Numeric(NumericMatrix {
-                        column_types: vec![NimlValueType::Float32],
                         rows: v.len(),
-                        values: v.clone(),
+                        columns: vec![TypedArray::Float32(v.iter().map(|&x| x as f32).collect())],
                     }),
                     AttributeValue::String(s) => {
                         NimlData::Text(s.strip_suffix('\0').unwrap_or(s).replace('\0', "~"))

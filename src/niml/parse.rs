@@ -6,22 +6,72 @@ use crate::error::{from_utf8, Error, Result};
 
 use super::{
     expand_ni_type, unescape, MixedTable, NimlData, NimlElement, NimlValue, NimlValueType,
-    NumericMatrix,
+    NumericMatrix, RecordField, RecordTable,
 };
+use crate::array;
 
 /// Parse every top-level element from a NIML byte stream.
 pub fn parse_bytes(bytes: &[u8]) -> Result<Vec<NimlElement>> {
     Parser::new(bytes).parse_all()
 }
 
+/// Parse the complete top-level elements at the start of a NIML stream that
+/// may still be arriving (e.g. an AFNI or SUMA socket).
+///
+/// Returns the elements and how many bytes they used; any partial element
+/// after them is left for the next call, once more bytes have arrived
+/// (`buffer.drain(..consumed)`, append, call again). Only input that can
+/// never become valid NIML is an error. Processing instructions such as
+/// `<?ni_do ... ?>` are skipped and count as consumed.
+///
+/// An element whose closing tag never comes is indistinguishable from one
+/// still arriving, so a reader should cap how much it buffers.
+pub fn parse_stream(bytes: &[u8]) -> Result<(Vec<NimlElement>, usize)> {
+    let mut parser = Parser::new(bytes);
+    let mut elements = Vec::new();
+    let mut consumed = 0;
+    loop {
+        parser.skip_whitespace();
+        if parser.pos >= bytes.len() {
+            // Only blanks after the last element: they are consumed too.
+            return Ok((elements, bytes.len()));
+        }
+        let start = parser.pos;
+        let step = if parser.peek(b"<?") {
+            parser.consume_until(b">").map(|()| None)
+        } else {
+            parser.parse_element().map(Some)
+        };
+        match step {
+            Ok(element) => {
+                elements.extend(element);
+                consumed = parser.pos;
+            }
+            Err(_) if parser.hit_end => {
+                // Ran out of input inside this element: wait for more.
+                let _ = start;
+                return Ok((elements, consumed));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 struct Parser<'a> {
     input: &'a [u8],
     pos: usize,
+    /// Set when parsing failed only because the input ended early, which
+    /// [`parse_stream`] treats as "wait for more bytes".
+    hit_end: bool,
 }
 
 impl<'a> Parser<'a> {
     fn new(input: &'a [u8]) -> Self {
-        Self { input, pos: 0 }
+        Self {
+            input,
+            pos: 0,
+            hit_end: false,
+        }
     }
 
     fn parse_all(&mut self) -> Result<Vec<NimlElement>> {
@@ -38,6 +88,12 @@ impl<'a> Parser<'a> {
             }
             elements.push(self.parse_element()?);
         }
+    }
+
+    /// An error for input that stopped before `what` was complete.
+    fn ended(&mut self, what: impl std::fmt::Display) -> Error {
+        self.hit_end = true;
+        Error::parse(format!("NIML input ended inside {what}"))
     }
 
     fn parse_element(&mut self) -> Result<NimlElement> {
@@ -77,10 +133,10 @@ impl<'a> Parser<'a> {
                 if self.peek(end_marker.as_bytes()) {
                     break;
                 }
-                if self.pos >= self.input.len() {
-                    return Err(Error::parse(format!(
-                        "missing closing tag for group {name}"
-                    )));
+                if self.pos >= self.input.len()
+                    || end_marker.as_bytes().starts_with(&self.input[self.pos..])
+                {
+                    return Err(self.ended(format_args!("group {name}")));
                 }
                 children.push(self.parse_element()?);
             }
@@ -89,12 +145,9 @@ impl<'a> Parser<'a> {
         } else {
             let end_marker = format!("</{name}>");
             if is_binary(&attrs) {
-                let payload_len = binary_payload_len(&attrs)?;
-                if self.pos + payload_len > self.input.len() {
-                    return Err(Error::parse(format!(
-                        "binary NIML payload for {name} ended early"
-                    )));
-                }
+                let Some(payload_len) = binary_payload_len(&attrs, &self.input[self.pos..])? else {
+                    return Err(self.ended(format_args!("the binary body of {name}")));
+                };
                 let body = &self.input[self.pos..self.pos + payload_len];
                 self.pos += payload_len;
                 self.skip_whitespace();
@@ -103,7 +156,7 @@ impl<'a> Parser<'a> {
             } else {
                 let Some(rel_end) = find_bytes(&self.input[self.pos..], end_marker.as_bytes())
                 else {
-                    return Err(Error::parse(format!("missing closing tag for {name}")));
+                    return Err(self.ended(format_args!("{name} (no closing tag yet)")));
                 };
                 let end = self.pos + rel_end;
                 let body = &self.input[self.pos..end];
@@ -130,6 +183,10 @@ impl<'a> Parser<'a> {
     }
 
     fn expect(&mut self, token: &[u8]) -> Result<()> {
+        let rest = &self.input[self.pos..];
+        if rest.len() < token.len() && token.starts_with(rest) {
+            return Err(self.ended(format_args!("{:?}", String::from_utf8_lossy(token))));
+        }
         if !self.peek(token) {
             return Err(Error::parse(format!(
                 "expected {:?} at byte {}",
@@ -143,8 +200,8 @@ impl<'a> Parser<'a> {
 
     fn consume_until(&mut self, token: &[u8]) -> Result<()> {
         let Some(index) = find_bytes(&self.input[self.pos..], token) else {
-            return Err(Error::parse(format!(
-                "did not find marker {:?}",
+            return Err(self.ended(format_args!(
+                "a section ending in {:?}",
                 String::from_utf8_lossy(token)
             )));
         };
@@ -161,7 +218,13 @@ impl<'a> Parser<'a> {
             self.pos += 1;
         }
         if self.pos == start {
+            if self.pos >= self.input.len() {
+                return Err(self.ended("an element name"));
+            }
             return Err(Error::parse("NIML element has no name"));
+        }
+        if self.pos >= self.input.len() {
+            return Err(self.ended("an element name"));
         }
         from_utf8(&self.input[start..self.pos], "NIML tag name")
     }
@@ -179,7 +242,7 @@ impl<'a> Parser<'a> {
             }
             self.pos += 1;
         }
-        Err(Error::parse("unterminated NIML element header"))
+        Err(self.ended("an element header"))
     }
 }
 
@@ -196,21 +259,58 @@ fn parse_body(attrs: &BTreeMap<String, String>, body: &[u8]) -> Result<NimlData>
         .map_err(|_| Error::parse("invalid NIML ni_dimen"))?
         .unwrap_or(0);
 
-    if is_binary(attrs) {
+    let record_type = record_type(&column_types);
+    let decoded;
+    let body = if is_base64(attrs) {
+        let text = from_utf8(body, "NIML base64 payload")?;
+        decoded = crate::base64::decode(&text)?;
+        decoded.as_slice()
+    } else {
+        body
+    };
+    if is_binary(attrs) || is_base64(attrs) {
+        let little = byte_order_is_little(attrs.get("ni_form").map_or("binary", String::as_str))?;
+        if let Some(record_type) = record_type {
+            return Ok(NimlData::Records(parse_binary_records(
+                body,
+                record_type,
+                rows,
+                little,
+            )?));
+        }
         if !column_types.iter().all(NimlValueType::is_numeric) {
             return Err(Error::unsupported(
-                "binary NIML payloads with string or variable columns",
+                "binary NIML payloads with string columns",
             ));
+        }
+        let need: usize = column_types
+            .iter()
+            .map(NimlValueType::byte_width)
+            .sum::<Result<usize>>()?
+            * rows;
+        if body.len() < need {
+            return Err(Error::parse(format!(
+                "binary NIML body has {} bytes but {rows} rows need {need}",
+                body.len()
+            )));
         }
         return Ok(NimlData::Numeric(parse_binary_matrix(
             body,
-            column_types,
+            &column_types,
             rows,
-            attrs.get("ni_form").map(String::as_str),
+            little,
         )?));
     }
 
     let text = from_utf8(body, "NIML text payload")?;
+
+    if let Some(record_type) = record_type {
+        return Ok(NimlData::Records(parse_ascii_records(
+            &text,
+            record_type,
+            rows,
+        )?));
+    }
 
     if column_types.iter().all(NimlValueType::is_numeric) {
         return Ok(NimlData::Numeric(parse_ascii_matrix(
@@ -239,12 +339,6 @@ fn parse_body(attrs: &BTreeMap<String, String>, body: &[u8]) -> Result<NimlData>
             rows,
             values,
         )?));
-    }
-
-    // SUMA_NIML_ROI_DATUM and other variable-length rows are exposed verbatim
-    // as text; crate::roi interprets them. Anything else becomes a mixed table.
-    if column_types == [NimlValueType::SumaRoiDatum] {
-        return Ok(NimlData::Text(text.trim().to_string()));
     }
 
     Ok(NimlData::Mixed(parse_mixed(&text, column_types, rows)?))
@@ -318,24 +412,150 @@ fn parse_ascii_matrix(
     NumericMatrix::new(column_types, rows, values)
 }
 
+/// Decode a row-interleaved binary matrix into one typed column per type.
 fn parse_binary_matrix(
     body: &[u8],
-    column_types: Vec<NimlValueType>,
+    column_types: &[NimlValueType],
     rows: usize,
-    ni_form: Option<&str>,
+    little: bool,
 ) -> Result<NumericMatrix> {
-    let little = byte_order_is_little(ni_form.unwrap_or("binary"))?;
-    let mut values = Vec::with_capacity(rows * column_types.len());
+    let widths = column_types
+        .iter()
+        .map(NimlValueType::byte_width)
+        .collect::<Result<Vec<_>>>()?;
+    let row_width: usize = widths.iter().sum();
     let mut offset = 0;
-    for _ in 0..rows {
-        for ty in &column_types {
-            let width = ty.byte_width()?;
-            let chunk = &body[offset..offset + width];
-            offset += width;
-            values.push(decode_binary(ty, chunk, little));
-        }
+    let mut columns = Vec::with_capacity(column_types.len());
+    for (ty, width) in column_types.iter().zip(&widths) {
+        let dtype = ty.data_type().expect("numeric column");
+        let bytes: Vec<u8> = if column_types.len() == 1 {
+            body[..rows * width].to_vec()
+        } else {
+            (0..rows)
+                .flat_map(|r| &body[r * row_width + offset..r * row_width + offset + width])
+                .copied()
+                .collect()
+        };
+        columns.push(array::decode_binary(&bytes, dtype, little, rows)?);
+        offset += width;
     }
-    NumericMatrix::new(column_types, rows, values)
+    Ok(NumericMatrix { rows, columns })
+}
+
+/// The rowtype of a variable-length record element, if `column_types` is one.
+fn record_type(column_types: &[NimlValueType]) -> Option<&NimlValueType> {
+    match column_types {
+        [ty] if ty.record_fields().is_some() => Some(ty),
+        _ => None,
+    }
+}
+
+/// Walk `rows` binary records of `fields` at the start of `body`, calling
+/// `visit` with each record. Returns the bytes used, or `None` if `body` ends
+/// first.
+fn walk_binary_records(
+    body: &[u8],
+    fields: &[RecordField],
+    rows: usize,
+    little: bool,
+    mut visit: impl FnMut(Vec<Vec<f64>>),
+) -> Result<Option<usize>> {
+    let mut pos = 0;
+    for _ in 0..rows {
+        let mut record: Vec<Vec<f64>> = Vec::with_capacity(fields.len());
+        for field in fields {
+            let count = match field.length_from {
+                None => 1,
+                Some(k) => {
+                    let n = record
+                        .get(k)
+                        .and_then(|v| v.first())
+                        .copied()
+                        .unwrap_or(0.0);
+                    if !(0.0..=1e9).contains(&n) || n.fract() != 0.0 {
+                        return Err(Error::parse(format!("invalid NIML record length {n}")));
+                    }
+                    n as usize
+                }
+            };
+            let width = field.ty.elem_size();
+            let Some(chunk) = body.get(pos..pos + count * width) else {
+                return Ok(None);
+            };
+            record.push(array::decode_binary(chunk, field.ty, little, count)?.to_f64_vec());
+            pos += count * width;
+        }
+        visit(record);
+    }
+    Ok(Some(pos))
+}
+
+fn parse_binary_records(
+    body: &[u8],
+    record_type: &NimlValueType,
+    rows: usize,
+    little: bool,
+) -> Result<RecordTable> {
+    let fields = record_type.record_fields().expect("record type");
+    let mut out = Vec::with_capacity(rows);
+    walk_binary_records(body, &fields, rows, little, |r| out.push(r))?
+        .ok_or_else(|| Error::parse("binary NIML records ended early"))?;
+    Ok(RecordTable {
+        record_type: record_type.clone(),
+        rows: out,
+    })
+}
+
+fn parse_ascii_records(
+    text: &str,
+    record_type: &NimlValueType,
+    rows: usize,
+) -> Result<RecordTable> {
+    let fields = record_type.record_fields().expect("record type");
+    let mut tokens = text.split_whitespace().map(|t| {
+        t.parse::<f64>().map_err(|_| {
+            Error::parse(format!(
+                "invalid {} value {t:?}",
+                record_type.canonical_name()
+            ))
+        })
+    });
+    let mut out = Vec::with_capacity(rows);
+    // ni_dimen gives the record count; read to the end if it is missing.
+    while rows == 0 || out.len() < rows {
+        let mut record: Vec<Vec<f64>> = Vec::with_capacity(fields.len());
+        for field in &fields {
+            let count = match field.length_from {
+                None => 1,
+                Some(k) => record[k][0].max(0.0) as usize,
+            };
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                match tokens.next() {
+                    Some(v) => values.push(v?),
+                    None if record.is_empty() && values.is_empty() && rows == 0 => {
+                        return Ok(RecordTable {
+                            record_type: record_type.clone(),
+                            rows: out,
+                        });
+                    }
+                    None => {
+                        return Err(Error::parse(format!(
+                            "{} record {} is incomplete",
+                            record_type.canonical_name(),
+                            out.len()
+                        )))
+                    }
+                }
+            }
+            record.push(values);
+        }
+        out.push(record);
+    }
+    Ok(RecordTable {
+        record_type: record_type.clone(),
+        rows: out,
+    })
 }
 
 fn parse_mixed(body: &str, column_types: Vec<NimlValueType>, rows: usize) -> Result<MixedTable> {
@@ -431,58 +651,17 @@ impl<'a> MixedParser<'a> {
     }
 }
 
-fn decode_binary(ty: &NimlValueType, bytes: &[u8], little: bool) -> f64 {
-    match ty {
-        NimlValueType::UInt8 => bytes[0] as f64,
-        NimlValueType::Int16 => {
-            let raw = [bytes[0], bytes[1]];
-            if little {
-                i16::from_le_bytes(raw) as f64
-            } else {
-                i16::from_be_bytes(raw) as f64
-            }
-        }
-        NimlValueType::Int32 => {
-            let raw = [bytes[0], bytes[1], bytes[2], bytes[3]];
-            if little {
-                i32::from_le_bytes(raw) as f64
-            } else {
-                i32::from_be_bytes(raw) as f64
-            }
-        }
-        NimlValueType::Float32 => {
-            let raw = [bytes[0], bytes[1], bytes[2], bytes[3]];
-            if little {
-                f32::from_le_bytes(raw) as f64
-            } else {
-                f32::from_be_bytes(raw) as f64
-            }
-        }
-        NimlValueType::Float64 => {
-            let raw = [
-                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-            ];
-            if little {
-                f64::from_le_bytes(raw)
-            } else {
-                f64::from_be_bytes(raw)
-            }
-        }
-        // Unreachable: binary bodies are gated to numeric types above.
-        _ => 0.0,
-    }
-}
-
+/// Byte order of a binary or base64 body, as `niml_elemio.c` decides it: by
+/// substring, and big-endian unless the form mentions `lsb`. So a bare
+/// `ni_form="binary"` is big-endian, whatever machine wrote or reads it.
 fn byte_order_is_little(ni_form: &str) -> Result<bool> {
-    match ni_form.to_ascii_lowercase().as_str() {
-        "binary" => Ok(cfg!(target_endian = "little")),
-        "binary.lsbfirst" => Ok(true),
-        "binary.msbfirst" => Ok(false),
-        other => Err(Error::unsupported(format!("binary NIML form {other:?}"))),
-    }
+    Ok(ni_form.to_ascii_lowercase().contains("lsb"))
 }
 
-fn binary_payload_len(attrs: &BTreeMap<String, String>) -> Result<usize> {
+/// Byte length of a binary element body at the start of `rest`, or `None` if
+/// `rest` does not hold all of it yet. Fixed-width rows are counted from
+/// `ni_dimen`; variable-length records are walked.
+fn binary_payload_len(attrs: &BTreeMap<String, String>, rest: &[u8]) -> Result<Option<usize>> {
     let ni_type = attrs
         .get("ni_type")
         .ok_or_else(|| Error::missing("ni_type on binary NIML element"))?;
@@ -492,19 +671,36 @@ fn binary_payload_len(attrs: &BTreeMap<String, String>) -> Result<usize> {
         .parse()
         .map_err(|_| Error::parse("invalid binary NIML ni_dimen"))?;
     let column_types = expand_ni_type(ni_type)?;
+    if let Some(record_type) = record_type(&column_types) {
+        let little = byte_order_is_little(attrs.get("ni_form").map_or("binary", String::as_str))?;
+        let fields = record_type.record_fields().expect("record type");
+        return walk_binary_records(rest, &fields, rows, little, |_| {});
+    }
     let row_width: usize = column_types
         .iter()
         .map(NimlValueType::byte_width)
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .sum();
-    Ok(rows * row_width)
+    let len = rows
+        .checked_mul(row_width)
+        .ok_or_else(|| Error::invalid("binary NIML payload size overflows"))?;
+    Ok((len <= rest.len()).then_some(len))
 }
 
+/// A raw binary body (`ni_form` contains `binary`, as AFNI tests it).
 fn is_binary(attrs: &BTreeMap<String, String>) -> bool {
     attrs
         .get("ni_form")
-        .is_some_and(|v| v.to_ascii_lowercase().starts_with("binary"))
+        .is_some_and(|v| v.to_ascii_lowercase().contains("binary"))
+}
+
+/// A base64-encoded binary body (`ni_form` contains `base64`). It is text up
+/// to the closing tag, and decodes to the same bytes a binary body holds.
+fn is_base64(attrs: &BTreeMap<String, String>) -> bool {
+    attrs
+        .get("ni_form")
+        .is_some_and(|v| v.to_ascii_lowercase().contains("base64"))
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

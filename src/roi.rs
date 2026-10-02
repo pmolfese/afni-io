@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{self, Error, Result};
-use crate::niml::{self, NimlData, NimlElement, NimlValueType};
+use crate::niml::{self, NimlData, NimlElement, NimlValueType, RecordTable};
 
 /// An RGBA colour with components in `[0, 1]`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -97,12 +97,16 @@ impl NodeRoi {
                 element.name
             )));
         }
-        let NimlData::Text(body) = &element.data else {
-            return Err(Error::parse(
-                "Node_ROI body is not SUMA_NIML_ROI_DATUM text",
-            ));
+        let data = match &element.data {
+            NimlData::Records(table) => datums_from_records(table)?,
+            // A Node_ROI with no strokes has no body.
+            NimlData::None => Vec::new(),
+            _ => {
+                return Err(Error::parse(
+                    "Node_ROI body is not SUMA_NIML_ROI_DATUM records",
+                ))
+            }
         };
-        let data = parse_datum_records(body)?;
         let attrs = &element.attrs;
 
         Ok(Self {
@@ -164,17 +168,24 @@ impl NodeRoi {
         if let Some(v) = self.edge_thickness {
             attrs.insert("EdgeThickness".into(), v.to_string());
         }
-        // Mark the column type explicitly so the writer emits the right ni_type.
-        attrs.insert(
-            "ni_type".into(),
-            NimlValueType::SumaRoiDatum.canonical_name().into(),
-        );
-        attrs.insert("ni_dimen".into(), self.data.len().to_string());
-
         NimlElement {
             name: "Node_ROI".into(),
             attrs,
-            data: NimlData::Text(serialize_datum_records(&self.data)),
+            data: NimlData::Records(RecordTable {
+                record_type: NimlValueType::SumaRoiDatum,
+                rows: self
+                    .data
+                    .iter()
+                    .map(|d| {
+                        vec![
+                            vec![f64::from(d.action)],
+                            vec![f64::from(d.element_type)],
+                            vec![d.nodes.len() as f64],
+                            d.nodes.iter().map(|&n| f64::from(n)).collect(),
+                        ]
+                    })
+                    .collect(),
+            }),
         }
     }
 
@@ -190,69 +201,42 @@ impl NodeRoi {
     }
 }
 
-fn parse_datum_records(body: &str) -> Result<Vec<RoiDatum>> {
-    let values = body
-        .split_whitespace()
-        .map(|t| {
-            t.parse::<i32>()
-                .map_err(|_| Error::parse(format!("invalid SUMA_NIML_ROI_DATUM value {t:?}")))
+/// Convert `SUMA_NIML_ROI_DATUM` records (`action, type, count, nodes`) into
+/// strokes.
+fn datums_from_records(table: &RecordTable) -> Result<Vec<RoiDatum>> {
+    if table.record_type != NimlValueType::SumaRoiDatum {
+        return Err(Error::parse(format!(
+            "Node_ROI holds {} records, not SUMA_NIML_ROI_DATUM",
+            table.record_type.canonical_name()
+        )));
+    }
+    let int = |v: f64, what: &str| -> Result<i32> {
+        if v.fract() != 0.0 || v < f64::from(i32::MIN) || v > f64::from(i32::MAX) {
+            return Err(Error::invalid(format!(
+                "SUMA_NIML_ROI_DATUM {what} {v} is not an int"
+            )));
+        }
+        Ok(v as i32)
+    };
+    table
+        .rows
+        .iter()
+        .map(|record| {
+            let nodes = record[3]
+                .iter()
+                .map(|&n| {
+                    let n = int(n, "node index")?;
+                    u32::try_from(n)
+                        .map_err(|_| Error::invalid("SUMA_NIML_ROI_DATUM node index is negative"))
+                })
+                .collect::<Result<_>>()?;
+            Ok(RoiDatum {
+                action: int(record[0][0], "action")?,
+                element_type: int(record[1][0], "element type")?,
+                nodes,
+            })
         })
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut records = Vec::new();
-    let mut pos = 0;
-    while pos < values.len() {
-        if pos + 3 > values.len() {
-            return Err(Error::parse("malformed SUMA_NIML_ROI_DATUM record header"));
-        }
-        let action = values[pos];
-        let element_type = values[pos + 1];
-        let count = values[pos + 2];
-        if count < 0 {
-            return Err(Error::invalid(
-                "SUMA_NIML_ROI_DATUM has negative node count",
-            ));
-        }
-        pos += 3;
-        let count = count as usize;
-        if pos + count > values.len() {
-            return Err(Error::parse("malformed SUMA_NIML_ROI_DATUM node path"));
-        }
-        let mut nodes = Vec::with_capacity(count);
-        for value in &values[pos..pos + count] {
-            if *value < 0 {
-                return Err(Error::invalid("SUMA_NIML_ROI_DATUM node index is negative"));
-            }
-            nodes.push(*value as u32);
-        }
-        pos += count;
-        records.push(RoiDatum {
-            action,
-            element_type,
-            nodes,
-        });
-    }
-    Ok(records)
-}
-
-fn serialize_datum_records(records: &[RoiDatum]) -> String {
-    let mut out = String::new();
-    for (i, record) in records.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(&format!(
-            "{} {} {}",
-            record.action,
-            record.element_type,
-            record.nodes.len()
-        ));
-        for node in &record.nodes {
-            out.push(' ');
-            out.push_str(&node.to_string());
-        }
-    }
-    out
+        .collect()
 }
 
 fn first_attr(attrs: &BTreeMap<String, String>, keys: &[&str]) -> Option<String> {

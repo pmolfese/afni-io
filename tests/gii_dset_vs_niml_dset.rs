@@ -38,7 +38,7 @@ fn assert_gii_matches_niml(gii_path: &Path, niml_path: &Path) {
         let mut worst_row = 0usize;
         for row in 0..nrows {
             let g = da.data.get_f64(row).unwrap_or(f64::NAN);
-            let n = dset.data.values[row * ncols + col];
+            let n = dset.data.get(row, col).unwrap();
             let diff = (g - n).abs();
             if diff > max_diff {
                 max_diff = diff;
@@ -51,7 +51,7 @@ fn assert_gii_matches_niml(gii_path: &Path, niml_path: &Path) {
             "col {col} ({label}): max diff {max_diff:.2e} at row {worst_row} \
              (gii={:?} niml={})",
             da.data.get_f64(worst_row),
-            dset.data.values[worst_row * ncols + col]
+            dset.data.get(worst_row, col).unwrap()
         );
     }
 }
