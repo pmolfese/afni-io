@@ -2,7 +2,7 @@
 type = string-attribute
 name = HISTORY_NOTE
 count = 418
-'[afni-io@: Fri Oct  2 16:37:45 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,3 -expr 'i+10*j+100*k+1000*t-300' -datum short -prefix s16\n[afni-io: Fri Oct  2 16:37:46 2026] {AFNI_26.2.08:macos_13_ARM} 3dresample -orient LPI -prefix lpi -input s16+orig\n[afni-io: Fri Oct  2 16:37:46 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -xorigin 12.5 -yorigin -7 -zorigin 3 -xdel 1.5 -ydel 2 -zdel 2.5 lpi+orig~
+'[afni-io@: Fri Oct  2 16:59:32 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,3 -expr 'i+10*j+100*k+1000*t-300' -datum short -prefix s16\n[afni-io: Fri Oct  2 16:59:33 2026] {AFNI_26.2.08:macos_13_ARM} 3dresample -orient LPI -prefix lpi -input s16+orig\n[afni-io: Fri Oct  2 16:59:33 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -xorigin 12.5 -yorigin -7 -zorigin 3 -xdel 1.5 -ydel 2 -zdel 2.5 lpi+orig~
 
 type = string-attribute
 name = TYPESTRING
@@ -12,12 +12,12 @@ count = 15
 type = string-attribute
 name = IDCODE_STRING
 count = 27
-'AFN_6tXI02v3ojTOp9y3BmWuLg~
+'AFN_XUTd7SYAOH2q7U_m70snLg~
 
 type = string-attribute
 name = IDCODE_DATE
 count = 25
-'Fri Oct  2 16:37:46 2026~
+'Fri Oct  2 16:59:33 2026~
 
 type = integer-attribute
 name = SCENE_DATA

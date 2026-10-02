@@ -55,6 +55,30 @@ fn inspect(path: &Path) -> Result<()> {
         if let Some(d) = brik.header.delta() {
             println!("  voxel size: {:?} mm", d);
         }
+        let h = &brik.header;
+        println!(
+            "  orient: {}  view: {}  obliquity: {:.3} deg",
+            h.orientation_string().unwrap_or_default(),
+            h.view().map_or("?", |v| v.suffix()),
+            h.obliquity()
+        );
+        if let Ok(m) = h.ijk_to_dicom() {
+            println!("  ijk_to_dicom (RAI):");
+            for row in &m[..3] {
+                println!(
+                    "    {:10.4} {:10.4} {:10.4} {:10.4}",
+                    row[0], row[1], row[2], row[3]
+                );
+            }
+        }
+        if let Some(t) = h.time_axis() {
+            println!(
+                "  time axis: nt={} TR={:?} s, {} slice offsets",
+                t.nt,
+                t.tr_seconds(),
+                t.slice_offsets.len()
+            );
+        }
         for (p, label) in brik.header.brick_labels().iter().enumerate() {
             println!("  [{p}] {label}");
         }

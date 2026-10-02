@@ -1,6 +1,6 @@
 
 Dataset File:    s16scaled+orig
-Identifier Code: AFN_FAPKuDcMzVX1-d-2nMFzmw  Creation Date: Fri Oct  2 16:37:45 2026
+Identifier Code: AFN_E9FZoiTttC2C6HlaOtIA-Q  Creation Date: Fri Oct  2 16:59:32 2026
 Template Space:  ORIG
 Dataset Type:    Func-Bucket (-fbuc)
 Byte Order:      LSB_FIRST [this CPU native = LSB_FIRST]
@@ -20,5 +20,5 @@ Number of values stored at each pixel = 1
                              [*   0.00207144]             0 to        67.875 [scaled]
 
 ----- HISTORY -----
-[afni-io@: Fri Oct  2 16:37:45 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,1 -expr '(i+10*j+100*k)/8' -datum short -fscale -prefix s16scaled
+[afni-io@: Fri Oct  2 16:59:32 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,1 -expr '(i+10*j+100*k)/8' -datum short -fscale -prefix s16scaled
 

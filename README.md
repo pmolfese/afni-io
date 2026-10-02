@@ -34,6 +34,15 @@ accessors. `Brik::read_sub_bricks` loads only the sub-bricks you ask for, and
 `.BRIK.gz` is decompressed as it streams. Binary NIML (`binary.lsbfirst` /
 `binary.msbfirst`) is also read.
 
+**Geometry** (`geometry`, plus methods on `head::Header`): the voxel-to-world
+matrix in AFNI's DICOM/RAI convention (`ijk_to_dicom`, using
+`IJK_TO_DICOM_REAL` when present) and in RAS (`ijk_to_ras`, the same as the
+sform `3dAFNItoNIFTI` writes), obliquity as `3dinfo` computes it, orientation
+string, view, and the time axis (TR, slice timing; milliseconds converted to
+seconds as AFNI does). Coordinates are always returned in the convention of
+the file they came from. The `geometry` module docs explain RAI vs RAS for
+AFNI, NIfTI, GIfTI and FreeSurfer.
+
 **NIfTI**: both the 348-byte NIfTI-1 and 540-byte NIfTI-2 headers, automatic
 byte-order detection, `scl_slope`/`scl_inter` scaling, and the qform/sform
 voxel-to-world affine. Single-file `.nii`/`.nii.gz` and detached `.hdr`/`.img`

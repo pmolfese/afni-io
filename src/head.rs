@@ -29,6 +29,7 @@
 use std::path::Path;
 
 use crate::error::{self, from_utf8, Error, Result};
+use crate::geometry::{Mat44, Orientation, TimeAxis, TimeUnits, View};
 
 /// The value array of a single header [`Attribute`].
 #[derive(Debug, Clone, PartialEq)]
@@ -326,6 +327,135 @@ impl Header {
         }
     }
 
+    // --- Geometry and timing (see `crate::geometry`) ------------------------
+
+    /// `ORIENT_SPECIFIC` as typed orientations, or `None` if the attribute is
+    /// missing, too short, or holds an unknown code.
+    pub fn orientations(&self) -> Option<[Orientation; 3]> {
+        let [a, b, c] = self.orientation()?;
+        Some([
+            Orientation::from_code(a)?,
+            Orientation::from_code(b)?,
+            Orientation::from_code(c)?,
+        ])
+    }
+
+    /// The orientation string AFNI prints (`3dinfo -orient`), e.g. `RAI`.
+    pub fn orientation_string(&self) -> Option<String> {
+        Some(self.orientations()?.iter().map(|o| o.letter()).collect())
+    }
+
+    /// The dataset's view (`SCENE_DATA[0]`).
+    pub fn view(&self) -> Option<View> {
+        View::from_code(*self.ints("SCENE_DATA")?.first()?)
+    }
+
+    /// The cardinal `ijk -> DICOM (RAI)` matrix built from `ORIENT_SPECIFIC`,
+    /// `ORIGIN` and `DELTA`, as `THD_daxes_to_mat44` builds it. This ignores
+    /// any obliquity; see [`Header::ijk_to_dicom`].
+    pub fn ijk_to_dicom_cardinal(&self) -> Result<Mat44> {
+        let orient = self
+            .orientations()
+            .ok_or_else(|| Error::missing("valid ORIENT_SPECIFIC"))?;
+        let origin = self.origin().ok_or_else(|| Error::missing("ORIGIN"))?;
+        let delta = self.delta().ok_or_else(|| Error::missing("DELTA"))?;
+        let mut m = crate::geometry::identity();
+        m[0][0] = 0.0;
+        m[1][1] = 0.0;
+        m[2][2] = 0.0;
+        let mut used = [false; 3];
+        for axis in 0..3 {
+            let row = orient[axis].dicom_axis();
+            if std::mem::replace(&mut used[row], true) {
+                return Err(Error::invalid(format!(
+                    "ORIENT_SPECIFIC {:?} uses one direction twice",
+                    orient.map(Orientation::code)
+                )));
+            }
+            m[row][axis] = delta[axis];
+            m[row][3] = origin[axis];
+        }
+        Ok(m)
+    }
+
+    /// `IJK_TO_DICOM_REAL` as a matrix, or `None` when the attribute is
+    /// missing or has fewer than 12 values.
+    pub fn ijk_to_dicom_real(&self) -> Option<Mat44> {
+        crate::geometry::mat44_from_3x4(&self.floats("IJK_TO_DICOM_REAL")?)
+    }
+
+    /// The `ijk -> DICOM (RAI)` matrix AFNI reports as `aform_real`:
+    /// `IJK_TO_DICOM_REAL` when present, otherwise the cardinal matrix.
+    pub fn ijk_to_dicom(&self) -> Result<Mat44> {
+        match self.ijk_to_dicom_real() {
+            Some(m) => Ok(m),
+            None => self.ijk_to_dicom_cardinal(),
+        }
+    }
+
+    /// [`Header::ijk_to_dicom`] converted to RAS, matching the sform that
+    /// `3dAFNItoNIFTI` writes.
+    pub fn ijk_to_ras(&self) -> Result<Mat44> {
+        Ok(crate::geometry::dicom_to_ras(&self.ijk_to_dicom()?))
+    }
+
+    /// Degrees from plumb (`3dinfo -obliquity`), from `IJK_TO_DICOM_REAL`;
+    /// 0 when that attribute is absent.
+    pub fn obliquity(&self) -> f64 {
+        self.ijk_to_dicom_real()
+            .map_or(0.0, |m| crate::geometry::oblique_angle(&m))
+    }
+
+    /// Whether the dataset is oblique (`3dinfo -is_oblique`).
+    pub fn is_oblique(&self) -> bool {
+        self.obliquity() > 0.0
+    }
+
+    /// The time axis, if the dataset has one (`TAXIS_NUMS` and
+    /// `TAXIS_FLOATS` both present), following `thd_dsetdblk.c`: slice
+    /// offsets are dropped when there are fewer than `TAXIS_NUMS[1]` of them,
+    /// and millisecond times are converted to seconds.
+    pub fn time_axis(&self) -> Option<TimeAxis> {
+        let nums = self.ints("TAXIS_NUMS")?;
+        let floats = self.floats("TAXIS_FLOATS")?;
+        let float = |i: usize| floats.get(i).copied().unwrap_or(0.0);
+        let stored_units = TimeUnits::from_code(nums.get(2).copied().unwrap_or(-1));
+        let scale = if stored_units == TimeUnits::Milliseconds {
+            0.001
+        } else {
+            1.0
+        };
+
+        let nsl = nums.get(1).copied().unwrap_or(0).max(0) as usize;
+        let offsets = self.floats("TAXIS_OFFSETS").unwrap_or_default();
+        let (slice_offsets, mut slice_z_origin, mut slice_dz) = if nsl > 0 && offsets.len() >= nsl {
+            (
+                offsets[..nsl].iter().map(|t| t * scale).collect(),
+                float(3),
+                float(4),
+            )
+        } else {
+            (Vec::new(), 0.0, 0.0)
+        };
+        // AFNI fills in an unset slice z-origin/spacing from the grid (2025).
+        if !slice_offsets.is_empty() && slice_z_origin == 0.0 && slice_dz == 0.0 {
+            if let (Some(origin), Some(delta)) = (self.origin(), self.delta()) {
+                slice_z_origin = origin[2];
+                slice_dz = delta[2];
+            }
+        }
+        Some(TimeAxis {
+            nt: (*nums.first()?).max(0) as usize,
+            origin: float(0) * scale,
+            step: float(1) * scale,
+            duration: float(2) * scale,
+            stored_units,
+            slice_offsets,
+            slice_z_origin,
+            slice_dz,
+        })
+    }
+
     /// Serialise to `.HEAD` text.
     pub fn to_head_string(&self) -> String {
         let mut out = String::new();
@@ -429,6 +559,75 @@ fn encode_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn geometry_header() -> Header {
+        let mut h = Header::default();
+        h.set("DATASET_RANK", AttributeValue::Int(vec![3, 3]));
+        // LPI: x runs L->R, y P->A, z I->S.
+        h.set("ORIENT_SPECIFIC", AttributeValue::Int(vec![1, 2, 4]));
+        h.set("ORIGIN", AttributeValue::Float(vec![12.5, -7.0, -3.0]));
+        h.set("DELTA", AttributeValue::Float(vec![-1.5, -2.0, 2.5]));
+        h
+    }
+
+    #[test]
+    fn cardinal_matrix_follows_thd_daxes_to_mat44() {
+        let h = geometry_header();
+        let expected = [
+            [-1.5, 0.0, 0.0, 12.5],
+            [0.0, -2.0, 0.0, -7.0],
+            [0.0, 0.0, 2.5, -3.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        assert_eq!(h.ijk_to_dicom_cardinal().unwrap(), expected);
+        // No IJK_TO_DICOM_REAL: falls back to the cardinal matrix, plumb.
+        assert_eq!(h.ijk_to_dicom().unwrap(), expected);
+        assert!(!h.is_oblique());
+        assert_eq!(h.orientation_string().as_deref(), Some("LPI"));
+
+        // An axis order such as ASL permutes columns into DICOM rows.
+        let mut h = geometry_header();
+        h.set("ORIENT_SPECIFIC", AttributeValue::Int(vec![3, 5, 1]));
+        let m = h.ijk_to_dicom_cardinal().unwrap();
+        assert_eq!((m[1][0], m[2][1], m[0][2]), (-1.5, -2.0, 2.5));
+        assert_eq!((m[1][3], m[2][3], m[0][3]), (12.5, -7.0, -3.0));
+
+        h.set("ORIENT_SPECIFIC", AttributeValue::Int(vec![0, 1, 4]));
+        assert!(
+            h.ijk_to_dicom_cardinal().is_err(),
+            "R2L and L2R share an axis"
+        );
+    }
+
+    #[test]
+    fn time_axis_converts_milliseconds_and_checks_offsets() {
+        let mut h = geometry_header();
+        h.set("TAXIS_NUMS", AttributeValue::Int(vec![3, 3, 77001]));
+        h.set(
+            "TAXIS_FLOATS",
+            AttributeValue::Float(vec![100.0, 2500.0, 0.0, 0.0, 0.0]),
+        );
+        h.set(
+            "TAXIS_OFFSETS",
+            AttributeValue::Float(vec![0.0, 1250.0, 500.0]),
+        );
+        let t = h.time_axis().unwrap();
+        assert_eq!(t.stored_units, TimeUnits::Milliseconds);
+        assert_eq!((t.nt, t.origin, t.tr_seconds()), (3, 0.1, Some(2.5)));
+        assert_eq!(t.slice_offsets, [0.0, 1.25, 0.5]);
+        // Unset slice z-origin/spacing are taken from the grid.
+        assert_eq!((t.slice_z_origin, t.slice_dz), (-3.0, 2.5));
+
+        // Fewer offsets than TAXIS_NUMS[1] says: AFNI drops slice timing.
+        h.set("TAXIS_NUMS", AttributeValue::Int(vec![3, 6, 0]));
+        let t = h.time_axis().unwrap();
+        assert_eq!(t.stored_units, TimeUnits::Seconds);
+        assert!(t.slice_offsets.is_empty());
+        assert_eq!(t.tr_seconds(), Some(2500.0));
+
+        h.set("TAXIS_NUMS", AttributeValue::Int(vec![3, 0, 77003]));
+        assert_eq!(h.time_axis().unwrap().tr_seconds(), None);
+    }
 
     #[test]
     fn brick_labels_keep_positions_and_default_like_afni() {

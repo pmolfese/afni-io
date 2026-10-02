@@ -44,6 +44,7 @@ pub mod brik;
 mod compress;
 pub mod dset;
 pub mod error;
+pub mod geometry;
 pub mod gifti;
 pub mod head;
 pub mod nifti;
@@ -62,6 +63,7 @@ pub mod prelude {
     pub use crate::brik::{AfniPaths, BrickData, Brik, BrikType, SubBrick};
     pub use crate::dset::NimlDataset;
     pub use crate::error::{Error, Result};
+    pub use crate::geometry::{Mat44, Orientation, TimeAxis, TimeUnits, View};
     pub use crate::gifti::{DataArray, Gifti};
     pub use crate::head::{Attribute, AttributeValue, Header};
     pub use crate::nifti::{Nifti, NiftiHeader, NiftiVersion};

@@ -124,10 +124,12 @@ fn surface_encodings_agree_with_1d_coords() {
             assert!((actual - expected).abs() < 1e-5, "asc node {n}");
         }
     }
-    // ConvertSurface negates x and y when it writes GIfTI (the .1D.coord and
-    // SurfaceMetrics outputs agree with the .asc), even though the GIfTI
-    // declares NIFTI_XFORM_UNKNOWN. Presumably SUMA's native RAI -> GIfTI RAS;
-    // confirm against the SUMA C source in Phase 2 (geometry / coordinates).
+    // SUMA holds surfaces in RAI and always writes GIfTI as RAS, negating x
+    // and y (`flip_float_triples`, suma_gifti.c). The .asc here is SUMA's own
+    // RAI output: SUMA only converts FreeSurfer RAS to RAI when aligning to a
+    // surface volume, and skips spheres (`SUMA_Align_to_VolPar`). So for this
+    // icosahedron the GIfTI is the .asc with x and y negated. afni-io returns
+    // each file's coordinates as stored; see the `geometry` module docs.
     for encoding in ["ascii", "b64", "b64gz"] {
         let gii = Gifti::read(common::data(&format!("surface/ico_{encoding}.gii"))).unwrap();
         let mesh = gii.to_surface().unwrap();

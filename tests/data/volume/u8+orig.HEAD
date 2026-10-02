@@ -2,7 +2,7 @@
 type = string-attribute
 name = HISTORY_NOTE
 count = 140
-'[afni-io@: Fri Oct  2 16:37:45 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,1 -expr 'i+4*j+20*k' -datum byte -prefix u8~
+'[afni-io@: Fri Oct  2 16:59:32 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,1 -expr 'i+4*j+20*k' -datum byte -prefix u8~
 
 type = string-attribute
 name = TYPESTRING
@@ -12,12 +12,12 @@ count = 15
 type = string-attribute
 name = IDCODE_STRING
 count = 27
-'AFN_Y-EylsNtqOTsZ_yUNP999w~
+'AFN_ksopPsW65Gs3iRyt4xeHqA~
 
 type = string-attribute
 name = IDCODE_DATE
 count = 25
-'Fri Oct  2 16:37:45 2026~
+'Fri Oct  2 16:59:32 2026~
 
 type = integer-attribute
 name = SCENE_DATA

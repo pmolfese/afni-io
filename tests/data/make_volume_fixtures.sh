@@ -64,6 +64,10 @@ gzip -f s16gz+orig.BRIK
 # --- timing: 3 sub-bricks as a 3D+time dataset with TR = 2 s ----------------
 3dTcat -prefix timeseries s16+orig >/dev/null
 3drefit -TR 2.0 timeseries+orig >/dev/null
+# Same data with TR = 2.5 s and slice timing (TAXIS_OFFSETS, one per z slice).
+# (3drefit refuses millisecond TRs, so the TAXIS ms case is a Rust unit test.)
+3dTcat -prefix slicetimed s16+orig >/dev/null
+3drefit -TR 2.5 -Tslices 0 1.25 0.25 1.5 0.5 1.75 slicetimed+orig >/dev/null
 
 # --- non-RAI orientation, non-zero origin, anisotropic voxels ---------------
 3dresample -orient LPI -prefix lpi -input s16+orig >/dev/null
@@ -85,13 +89,15 @@ rm -f _oblique.1D
 3dAFNItoNIFTI -pure -prefix stat_pure.nii stat+orig >/dev/null 2>&1
 3dAFNItoNIFTI -prefix s16.nii.gz s16+orig >/dev/null 2>&1
 3dAFNItoNIFTI -prefix lpi.nii lpi+orig >/dev/null 2>&1
+3dAFNItoNIFTI -prefix oblique.nii oblique+orig >/dev/null 2>&1
 
 # --- AFNI's own reference values ---------------------------------------------
 for head in *.HEAD; do
   ds="${head%.HEAD}"
   3dinfo -verb "$ds" > "$ds.3dinfo.txt" 2>/dev/null
-  3dinfo -aform_real -is_oblique -datum -orient -nv -tr -av_space "$ds" \
+  3dinfo -aform_real -is_oblique -obliquity -datum -orient -nv -tr -av_space "$ds" \
     > "$ds.aform.txt" 2>/dev/null
+  3dinfo -slice_timing "$ds" > "$ds.slice_timing.txt" 2>/dev/null
   # Every voxel: i j k then one value per sub-brick (scaled to true values).
   # Each sub-brick is dumped on its own and pasted together, because
   # 3dmaskdump on a whole mixed-datum dataset (byte|float) prints the float
@@ -108,7 +114,7 @@ for head in *.HEAD; do
   rm -f _ijk.txt _b*.txt
 done
 for nii in *.nii *.nii.gz; do
-  3dinfo -aform_real -is_oblique -datum -orient -nv -tr "$nii" > "$nii.aform.txt" 2>/dev/null
+  3dinfo -aform_real -is_oblique -obliquity -datum -orient -nv -tr "$nii" > "$nii.aform.txt" 2>/dev/null
 done
 
 echo "wrote $(ls | wc -l | tr -d ' ') files to $out"

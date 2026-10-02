@@ -13,7 +13,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 |---|-------|--------|
 | 0 | Setup: repo, name, license, fixtures, test harness | ✅ |
 | 1 | HEAD/BRIK reader parity | ✅ |
-| 2 | Geometry | ⬜ |
+| 2 | Geometry | ✅ |
 | 3 | Stat metadata and the NIfTI AFNI extension | ⬜ |
 | 4 | BRIK writing, housekeeping, sumaru volume swap | ⬜ |
 | 5 | NIML core parity | ⬜ |
@@ -61,14 +61,22 @@ Checked against real data: a 256³ × 3 byte `.BRIK.gz` built from the sumaru
 subject T1 (not committed) matched `3dmaskdump`/`3dBrickStat`. Reading one
 sub-brick took 33 ms, all three 111 ms.
 
-## Phase 2 — Geometry ⬜
+## Phase 2 — Geometry ✅
 
-Brief task 2.
+Brief task 2. New `geometry` module, plus methods on `head::Header`.
 
-- [ ] `ijk_to_dicom()` (from `IJK_TO_DICOM_REAL`, or else orientation + origin + delta, checked against `THD_daxes_to_mat44`), `ijk_to_ras()`, `is_oblique()`
-- [ ] View type (`SCENE_DATA[0]`), and `TAXIS_*` timing (TR, nt)
-- [ ] Test: the HEAD affine equals the NIfTI sform written by `3dAFNItoNIFTI`
-- [ ] Pin down the coordinate convention for surfaces (see the log entry on SUMA's GIfTI x/y flip)
+- [x] `ijk_to_dicom_cardinal()` (a port of `THD_daxes_to_mat44`), `ijk_to_dicom_real()`, `ijk_to_dicom()` (real when present, otherwise cardinal; this is `3dinfo -aform_real`), `ijk_to_ras()`
+- [x] Confirmed the brief's sign question: AFNI maps axes to DICOM with a pure permutation (`THD_set_daxes_to_dicomm`), and the signs live in the signed `DELTA`/`ORIGIN`. The LPI fixture's cardinal matrix equals AFNI's real matrix
+- [x] `obliquity()` / `is_oblique()`, a port of `THD_compute_oblique_angle` (0.01° threshold)
+- [x] `orientations()` / `orientation_string()` (`Orientation` enum), `view()` (`View`: `+orig`/`+acpc`/`+tlrc`)
+- [x] `time_axis()` (`TimeAxis`): nt, origin, TR, duration, slice offsets and z-origin/spacing. Milliseconds are converted to seconds; slice offsets are dropped when there are too few (`thd_dsetdblk.c`)
+- [x] Helpers: `Mat44`, `dicom_to_ras`, `flip_xy`, `transform_point`, `oblique_angle`, `mat44_from_3x4`
+- [x] Tests: every fixture HEAD matches `3dinfo`'s matrix, obliquity, orientation, nv, TR, view and slice timing; HEAD `ijk_to_ras` equals the NIfTI sform from `3dAFNItoNIFTI`, including the oblique one
+- [x] Surface coordinate convention pinned down and documented in the `geometry` module (see log). No implicit conversion anywhere
+- [x] New fixtures: `slicetimed+orig`, `oblique.nii`, `*.slice_timing.txt`, and `-obliquity` in `*.aform.txt`
+- [x] `examples/inspect.rs` prints orientation, view, obliquity, the matrix and the time axis
+
+No breaking API changes; only additions.
 
 ## Phase 3 — Stat metadata and the NIfTI AFNI extension ⬜
 
@@ -85,7 +93,7 @@ Brief tasks 3–4.
 Brief tasks 5–6.
 
 - [ ] `Brik::write`, with a round-trip test
-- [ ] README format table, `examples/inspect.rs` (geometry, oblique flag, stat info)
+- [ ] README format table, `examples/inspect.rs` stat info (geometry printing was done in Phase 2)
 - [ ] Optional `read_any()` covering both NIfTI and BRIK
 - [ ] Move `sumaru/src/volume.rs` onto the crate and remove the `nifti` dependency
 
@@ -130,6 +138,33 @@ Brief tasks 5–6.
 Newest first. Record anything about AFNI, SUMA or sumaru behaviour that
 affects the design, with the phase it was found in.
 
+- **2026-10-02 · Phase 2.** **Surface coordinates.** SUMA holds surfaces in
+  RAI (DICOM). It flips GIfTI x/y on read and on write (`flip_float_triples`
+  in `suma_gifti.c`, unless `AFNI_GIFTI_IN_RAI=YES`), and also flips the GIfTI
+  `CoordinateSystemTransformMatrix` (`AFF44_LPI_RAI_FLIP`). It flips FreeSurfer
+  surfaces from RAS to RAI only in `SUMA_Align_to_VolPar` (`SUMA_VolData.c`),
+  i.e. when aligning them to a surface volume, and skips spheres and flat
+  patches. That is why our sphere's GIfTI is flipped relative to its `.asc`.
+  sumaru does its own RAI→RAS conversion (`afni_rai_to_ras`,
+  `surface_uses_lpi_coordinates`); when sumaru moves onto afni-io (Phases
+  7–8), check those against these rules, especially the sphere/flat exception.
+- **2026-10-02 · Phase 2.** AFNI names an axis by the side it *starts*
+  from; nibabel and FreeSurfer name it by the side it points *toward*. So
+  AFNI "RAI" is LPS (DICOM, +x Left), and AFNI "LPI" is what nibabel calls
+  RAS (+x Right). SUMA's GIfTI code says "LPI" for GIfTI's RAS. Check the
+  matrix, not the letters.
+- **2026-10-02 · Phase 2.** AFNI keeps both a cardinal matrix (from
+  `ORIGIN`/`DELTA`/`ORIENT_SPECIFIC`) and `IJK_TO_DICOM_REAL`. Display uses the
+  cardinal grid; `3dinfo -aform_real`, obliquity and NIfTI output use the real
+  one. Editing `IJK_TO_DICOM_REAL` alone (as the oblique fixture does) leaves
+  the cardinal matrix plumb. A viewer that wants to look like AFNI should use
+  the cardinal matrix for slicing and the real one for world coordinates.
+- **2026-10-02 · Phase 2.** `3drefit` refuses millisecond TRs ("no longer
+  allowed"), and AFNI converts any stored millisecond time axis to seconds on
+  load unless `AFNI_ALLOW_MILLISECONDS` is set. Current AFNI writes
+  `TAXIS_NUMS[2] = 0`, not 77002, for seconds; anything other than
+  77001/77003 means seconds. `TAXIS_NUMS`, `TAXIS_FLOATS` and `SCENE_DATA`
+  are padded to 8 entries with -999 / -999999.
 - **2026-10-02 · Phase 1.** **Bug fixed:** `Header::brick_labels()` split on
   `~`, but `.HEAD` string decoding had already turned `~` into NUL, so every
   multi-sub-brick dataset returned one glued-together label. It also dropped

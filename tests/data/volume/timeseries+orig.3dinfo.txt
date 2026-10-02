@@ -1,6 +1,6 @@
 
 Dataset File:    timeseries+orig
-Identifier Code: AFN_L6jGfCoL7gJpvfUuBnSt2w  Creation Date: Fri Oct  2 16:37:46 2026
+Identifier Code: AFN_KuL2cPE-En2xeU7Hun7gcg  Creation Date: Fri Oct  2 16:59:33 2026
 Template Space:  ORIG
 Dataset Type:    Func-Bucket (-fbuc)
 Byte Order:      LSB_FIRST [this CPU native = LSB_FIRST]
@@ -21,6 +21,6 @@ Number of time steps = 3  Time step = 2.00000none  Origin = 0.00000none
   -- At sub-brick #2 '#2' datum type is short:         1700 to          2243
 
 ----- HISTORY -----
-[afni-io@: Fri Oct  2 16:37:46 2026] {AFNI_26.2.08:macos_13_ARM} 3dTcat -prefix timeseries s16+orig
-[afni-io: Fri Oct  2 16:37:46 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -TR 2.0 timeseries+orig
+[afni-io@: Fri Oct  2 16:59:33 2026] {AFNI_26.2.08:macos_13_ARM} 3dTcat -prefix timeseries s16+orig
+[afni-io: Fri Oct  2 16:59:33 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -TR 2.0 timeseries+orig
 

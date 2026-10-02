@@ -34,18 +34,22 @@ lists the formulas.
 | `s16gz` | `.BRIK.gz` |
 | `stat` | `BRICK_STATAUX`/`BRICK_STATSYM` (`Ttest(23)`, `Ftest(2,40)`). The label was given as `Fstat~with~tildes`, but AFNI stores `~` (the `BRICK_LABS` separator) as `*` |
 | `timeseries` | 3D+time with TR = 2 s |
+| `slicetimed` | TR = 2.5 s with six slice offsets (`TAXIS_OFFSETS`). `3drefit` no longer accepts millisecond TRs, so that case is a unit test |
 | `lpi` | LPI orientation, non-zero origin, voxel sizes 1.5 × 2 × 2.5 mm |
 | `u8tlrc+tlrc` | the tlrc view |
 | `oblique` | `IJK_TO_DICOM_REAL` set to a 10° rotation about z |
 | `stat.nii` | NIfTI **with** the AFNI ecode-4 extension |
 | `stat_pure.nii` | the same data **without** the extension (`-pure`) |
-| `s16.nii.gz`, `lpi.nii` | gzipped NIfTI, and NIfTI with a non-RAI orientation |
+| `s16.nii.gz`, `lpi.nii`, `oblique.nii` | gzipped NIfTI, NIfTI with a non-RAI orientation, and an oblique NIfTI |
 
 The reference files for each dataset:
 
 - `*.3dinfo.txt`: `3dinfo -verb`.
-- `*.aform.txt`: `3dinfo -aform_real -is_oblique -datum -orient -nv -tr -av_space`.
-  The matrix is in AFNI's DICOM (RAI) convention.
+- `*.aform.txt`: `3dinfo -aform_real -is_oblique -obliquity -datum -orient -nv -tr -av_space`.
+  The matrix is in AFNI's DICOM (RAI) convention. `-tr` prints 0 when there
+  is no time axis.
+- `*.slice_timing.txt`: `3dinfo -slice_timing`, which prints one zero per
+  slice when the dataset has no slice timing.
 - `*.dump.txt`: one line per voxel, `i j k v0 v1 …`, with values scaled to their
   true values.
 
@@ -69,9 +73,12 @@ All of it comes from `CreateIcosahedron -ld 2` (42 nodes, 80 triangles).
 
 Things the AFNI tools do that matter for tests:
 
-- `ConvertSurface` **negates x and y when it writes GIfTI**, even though the file
-  declares `NIFTI_XFORM_UNKNOWN`. `.asc`, `.1D.coord` and `SurfaceMetrics` all
-  agree with each other. See `surface_encodings_agree_with_1d_coords`.
+- `ConvertSurface` **negates x and y when it writes GIfTI**. SUMA holds
+  surfaces in RAI and always writes GIfTI as RAS (`suma_gifti.c`), but it never
+  converted this sphere from RAS when reading it (`SUMA_Align_to_VolPar` skips
+  spheres). So `.asc`, `.1D.coord` and `SurfaceMetrics` agree with each other,
+  and the GIfTI is flipped relative to them. See
+  `surface_encodings_agree_with_1d_coords` and the `geometry` module docs.
 - `ConvertDset` writes valueless attributes (`domain_parent_idcode` with no
   `=`), which AFNI's own NIML parser accepts.
 - A dense GIfTI dset has no `NODE_INDEX` array, and
