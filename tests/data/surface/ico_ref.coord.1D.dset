@@ -6,7 +6,7 @@
 #z  = Z
 #nI	x	y	z
 
-#History:[afni-io Fri Oct  2 17:12:57 2026] SurfaceMetrics -i ico.asc -coords -prefix ico_ref
+#History:[afni-io Fri Oct  2 17:57:27 2026] SurfaceMetrics -i ico.asc -coords -prefix ico_ref
 0	0.000000	26.286556	-42.532539	
 1	0.000000	26.286556	42.532539	
 2	0.000000	-26.286556	42.532539	

@@ -1,6 +1,6 @@
 
 Dataset File:    u8+orig
-Identifier Code: AFN_ksopPsW65Gs3iRyt4xeHqA  Creation Date: Fri Oct  2 16:59:32 2026
+Identifier Code: AFN_kas5t4x8Lpq7bau_9basIQ  Creation Date: Fri Oct  2 17:57:21 2026
 Template Space:  ORIG
 Dataset Type:    Func-Bucket (-fbuc)
 Byte Order:      LSB_FIRST [this CPU native = LSB_FIRST]
@@ -19,5 +19,5 @@ Number of values stored at each pixel = 1
   -- At sub-brick #0 '#0' datum type is byte:            0 to           119
 
 ----- HISTORY -----
-[afni-io@: Fri Oct  2 16:59:32 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,1 -expr 'i+4*j+20*k' -datum byte -prefix u8
+[afni-io@: Fri Oct  2 17:57:21 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,1 -expr 'i+4*j+20*k' -datum byte -prefix u8
 

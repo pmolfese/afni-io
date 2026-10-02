@@ -862,7 +862,7 @@ impl Source<'_> {
 /// A fresh dataset ID in AFNI's form: `AFN_` plus 22 characters from
 /// `[A-Za-z0-9_-]` (`UNIQ_idcode`). Uniqueness comes from the standard
 /// library's randomly keyed hasher plus the time and a counter.
-fn new_idcode() -> String {
+pub(crate) fn new_idcode() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,6 +1,6 @@
 
 Dataset File:    slicetimed+orig
-Identifier Code: AFN_ihWZv2NnDvth8lh7950q6A  Creation Date: Fri Oct  2 16:59:33 2026
+Identifier Code: AFN_-8d-VJ8zjMShymYImFbqLw  Creation Date: Fri Oct  2 17:57:22 2026
 Template Space:  ORIG
 Dataset Type:    Func-Bucket (-fbuc)
 Byte Order:      LSB_FIRST [this CPU native = LSB_FIRST]
@@ -21,6 +21,6 @@ Number of time steps = 3  Time step = 2.50000none  Origin = 0.00000none  Number 
   -- At sub-brick #2 '#2' datum type is short:         1700 to          2243
 
 ----- HISTORY -----
-[afni-io@: Fri Oct  2 16:59:33 2026] {AFNI_26.2.08:macos_13_ARM} 3dTcat -prefix slicetimed s16+orig
-[afni-io: Fri Oct  2 16:59:33 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -TR 2.5 -Tslices 0 1.25 0.25 1.5 0.5 1.75 slicetimed+orig
+[afni-io@: Fri Oct  2 17:57:22 2026] {AFNI_26.2.08:macos_13_ARM} 3dTcat -prefix slicetimed s16+orig
+[afni-io: Fri Oct  2 17:57:22 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -TR 2.5 -Tslices 0 1.25 0.25 1.5 0.5 1.75 slicetimed+orig
 

@@ -14,7 +14,8 @@ code); the only dependencies are
 | Module | Format | Extensions | Read | Write |
 |--------|--------|-----------|:----:|:-----:|
 | `niml` | Generic NIML element trees (ASCII, binary, base64), including streams | `.niml`, `.niml.asc` | ✅ | ✅ |
-| `dset` | Surface datasets (`AFNI_dataset`) | `.niml.dset` | ✅ | ✅ |
+| `dset` | Surface datasets (`AFNI_dataset`), incl. label datasets and time series | `.niml.dset` | ✅ | ✅ |
+| `labels` | Label tables (`VALUE_LABEL_DTABLE`, `AFNI_labeltable`) | `.niml.lt`, `.niml.cmap` | ✅ | ✅ |
 | `roi`  | Drawn surface ROIs (`Node_ROI`) | `.niml.roi` | ✅ | ✅ |
 | `brik` | AFNI volume datasets (`.HEAD`/`.BRIK` pair), all 8 datum types | `.HEAD` + `.BRIK`/`.BRIK.gz` | ✅ | ✅ |
 | `head` | `.HEAD` attributes only (header of the pair) | `.HEAD` | ✅ | ✅ |
@@ -49,6 +50,16 @@ are read and written in ASCII and binary. `serialize_binary` writes the
 `binary.lsbfirst` form AFNI and SUMA use for large data, and `parse_stream`
 parses a stream that is still arriving (e.g. from an AFNI or SUMA socket).
 It returns the complete elements plus the number of bytes they used.
+
+**Surface datasets** (`dset`): every `AFNI_atr` attribute is kept, so a
+dataset survives a read and write intact: history, FDR curves, unique-value
+lists, and anything else AFNI adds. Column labels, types, statistics and
+ranges are read by position. The time step of a time series is read, and so
+is the label table of a label dataset (e.g. a FreeSurfer annotation).
+`write` and `write_binary` produce files AFNI reads back value for value.
+**Label tables** (`labels`) read and write both AFNI layouts, and
+`Header::value_label_table` gives a label volume's table (`3drefit
+-labeltable`), from a `.HEAD` or from a NIfTI's AFNI extension.
 
 **Geometry** (`geometry`, plus methods on `head::Header`): the voxel-to-world
 matrix in AFNI's DICOM/RAI convention (`ijk_to_dicom`, using
@@ -85,7 +96,7 @@ use afni_io::prelude::*;
 
 // Surface dataset
 let dset = NimlDataset::read("lh.thickness.niml.dset")?;
-println!("{} nodes x {} columns", dset.rows(), dset.columns());
+println!("{} nodes x {} columns", dset.rows(), dset.column_count());
 
 // Volume
 let brik = Brik::read("anat+orig.HEAD")?;

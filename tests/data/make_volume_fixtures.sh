@@ -84,12 +84,18 @@ echo '0.984808 -0.173648 0 1  0.173648 0.984808 0 2  0 0 1 3' > _oblique.1D
 3drefit -atrfloat IJK_TO_DICOM_REAL _oblique.1D oblique+orig >/dev/null
 rm -f _oblique.1D
 
+# --- a label table (VALUE_LABEL_DTABLE), from the committed aparc table -----
+3dcopy u8+orig labelled >/dev/null
+3drefit -labeltable ../real/labels/aparc+aseg_REN_all.niml.lt labelled+orig >/dev/null
+
 # --- NIfTI: with the AFNI ecode-4 extension, without it, and gzipped ---------
 3dAFNItoNIFTI -prefix stat.nii stat+orig >/dev/null 2>&1
 3dAFNItoNIFTI -pure -prefix stat_pure.nii stat+orig >/dev/null 2>&1
 3dAFNItoNIFTI -prefix s16.nii.gz s16+orig >/dev/null 2>&1
 3dAFNItoNIFTI -prefix lpi.nii lpi+orig >/dev/null 2>&1
 3dAFNItoNIFTI -prefix oblique.nii oblique+orig >/dev/null 2>&1
+3dAFNItoNIFTI -prefix labelled.nii labelled+orig >/dev/null 2>&1
+3dinfo -labeltable labelled+orig > labelled+orig.labeltable.txt 2>/dev/null
 
 # --- AFNI's own reference values ---------------------------------------------
 for head in *.HEAD; do

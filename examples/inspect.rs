@@ -25,10 +25,25 @@ fn inspect(path: &Path) -> Result<()> {
     if name.ends_with(".niml.dset") {
         let dset = NimlDataset::read(path)?;
         println!("niml.dset  type={}", dset.dset_type);
-        println!("  {} nodes x {} sub-bricks", dset.rows(), dset.columns());
+        println!(
+            "  {} nodes x {} sub-bricks",
+            dset.rows(),
+            dset.column_count()
+        );
         println!("  sparse: {}", dset.is_sparse());
-        for c in 0..dset.columns() {
-            println!("  col {c}: {}", dset.column_label(c));
+        if let Some(step) = dset.time_step {
+            println!("  time step: {step} s");
+        }
+        for (c, stat) in dset.column_stats().iter().enumerate() {
+            match stat {
+                Some(stat) => {
+                    println!("  col {c}: {}  {}", dset.column_label(c), stat.to_statsym())
+                }
+                None => println!("  col {c}: {}", dset.column_label(c)),
+            }
+        }
+        if let Some(table) = &dset.label_table {
+            println!("  label table: {} entries", table.entries.len());
         }
     } else if name.ends_with(".niml.roi") {
         let rois = NodeRoi::read_all(path)?;

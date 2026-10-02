@@ -10,6 +10,7 @@
 //! | [`niml`] | NIML element trees (ASCII and binary) | `.niml`, `.niml.asc` |
 //! | [`dset`] | Surface datasets (`AFNI_dataset`) | `.niml.dset` |
 //! | [`roi`]  | Drawn surface ROIs (`Node_ROI`) | `.niml.roi` |
+//! | [`labels`] | Label tables | `.niml.lt`, `.niml.cmap` |
 //! | [`brik`] | AFNI volume datasets (`.HEAD`/`.BRIK` pair) | `.HEAD` + `.BRIK`/`.BRIK.gz` |
 //! | [`volume`] | AFNI or NIfTI volumes through one API | any of the above |
 //! | [`spec`] | SUMA surface spec files | `.spec` |
@@ -29,7 +30,7 @@
 //! use afni_io::dset::NimlDataset;
 //!
 //! let dset = NimlDataset::read("lh.thickness.niml.dset")?;
-//! println!("{} nodes x {} columns", dset.rows(), dset.columns());
+//! println!("{} nodes x {} columns", dset.rows(), dset.column_count());
 //! # Ok::<(), afni_io::Error>(())
 //! ```
 //!
@@ -48,6 +49,7 @@ pub mod error;
 pub mod geometry;
 pub mod gifti;
 pub mod head;
+pub mod labels;
 pub mod nifti;
 pub mod niml;
 pub mod onedee;
@@ -64,15 +66,16 @@ pub use error::{Error, Result};
 pub mod prelude {
     pub use crate::array::{DataType, TypedArray};
     pub use crate::brik::{AfniPaths, BrickData, Brik, BrikType, SubBrick};
-    pub use crate::dset::NimlDataset;
+    pub use crate::dset::{ColumnRange, NimlDataset};
     pub use crate::error::{Error, Result};
     pub use crate::geometry::{Mat44, Orientation, TimeAxis, TimeUnits, View};
     pub use crate::gifti::{DataArray, Gifti};
     pub use crate::head::{Attribute, AttributeValue, Header};
+    pub use crate::labels::{LabelEntry, LabelTable};
     pub use crate::nifti::{Nifti, NiftiHeader, NiftiVersion};
     pub use crate::niml::{NimlData, NimlElement, NimlValue, NimlValueType};
     pub use crate::onedee::OneD;
-    pub use crate::roi::{NodeRoi, RoiDatum};
+    pub use crate::roi::{BrushAction, NodeRoi, RoiDatum, RoiDrawingType, RoiElementType, Side};
     pub use crate::spec::{Spec, SpecSurface};
     pub use crate::stat::{StatKind, StatSpec, ThresholdCurve};
     pub use crate::surface::Surface;

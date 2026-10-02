@@ -4,11 +4,11 @@
    <MetaData>
       <MD>
          <Name><![CDATA[UniqueID]]></Name>
-         <Value><![CDATA[AFN_SmG1TLOkFwtjshxTWG8gtg]]></Value>
+         <Value><![CDATA[AFN_od0DNDpBVceNBmUvzmlmGg]]></Value>
       </MD>
       <MD>
          <Name><![CDATA[AFNI_History]]></Name>
-         <Value><![CDATA[[afni-io Fri Oct  2 17:12:57 2026] ConvertDset -i _stat.1D -add_node_index -o_niml_asc -prefix stat.niml.dset\n[afni-io: Fri Oct  2 17:12:57 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -substatpar 0 fitt 10 -substatpar 1 fift 2 30 -sublabel 0 T#0 -sublabel 1 F#1 stat.niml.dset;\n[afni-io Fri Oct  2 17:12:57 2026] ConvertDset -i stat.niml.dset -o_gii_asc -prefix stat.gii.dset]]></Value>
+         <Value><![CDATA[[afni-io Fri Oct  2 17:57:27 2026] ConvertDset -i _stat.1D -add_node_index -o_niml_asc -prefix stat.niml.dset\n[afni-io: Fri Oct  2 17:57:27 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -substatpar 0 fitt 10 -substatpar 1 fift 2 30 -sublabel 0 T#0 -sublabel 1 F#1 stat.niml.dset;\n[afni-io Fri Oct  2 17:57:27 2026] ConvertDset -i stat.niml.dset -o_gii_asc -prefix stat.gii.dset]]></Value>
       </MD>
       <MD>
          <Name><![CDATA[gifticlib-version]]></Name>

@@ -1,6 +1,6 @@
 
 Dataset File:    rgb+orig
-Identifier Code: AFN_UiyKM3z_zWjBH26NOhX1BQ  Creation Date: Fri Oct  2 16:59:33 2026
+Identifier Code: AFN_KTGgK_mW6T7VaAFgXP6Kyg  Creation Date: Fri Oct  2 17:57:22 2026
 Template Space:  ORIG
 Dataset Type:    Intensity (-fim)
 Byte Order:      LSB_FIRST [this CPU native = LSB_FIRST]
@@ -19,5 +19,5 @@ Number of values stored at each pixel = 1
   -- At sub-brick #0 '#0' datum type is rgb:            0 to        194.02
 
 ----- HISTORY -----
-[afni-io@: Fri Oct  2 16:59:33 2026] {AFNI_26.2.08:macos_13_ARM} 3dThreetoRGB -prefix rgb _r+orig _g+orig _b+orig
+[afni-io@: Fri Oct  2 17:57:22 2026] {AFNI_26.2.08:macos_13_ARM} 3dThreetoRGB -prefix rgb _r+orig _g+orig _b+orig
 

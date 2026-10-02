@@ -5,7 +5,6 @@ mod common;
 
 use afni_io::head::AttributeValue;
 use afni_io::prelude::*;
-use afni_io::stat::parse_statsym_list;
 
 fn stat_head() -> Header {
     Header::read(common::data("volume/stat+orig.HEAD")).unwrap()
@@ -95,7 +94,7 @@ fn nifti_afni_extension_round_trips_through_write() {
 #[test]
 fn niml_dset_statsym_uses_the_same_type() {
     let dset = NimlDataset::read(common::data("surface/stat.niml.dset")).unwrap();
-    let stats = parse_statsym_list(&format!("{};", dset.stats.join(";")));
+    let stats = dset.column_stats();
     assert_eq!(statsyms(&stats), ["Ttest(10)", "Ftest(2,30)"]);
 }
 
@@ -108,7 +107,7 @@ fn gifti_intents_use_the_same_type() {
 
     // The same statistics, from the NIML version of the dataset.
     let dset = NimlDataset::read(common::data("surface/stat.niml.dset")).unwrap();
-    let from_niml = parse_statsym_list(&dset.stats.join(";"));
+    let from_niml = dset.column_stats();
     assert_eq!(stats, from_niml);
 
     // Surfaces carry no statistic.

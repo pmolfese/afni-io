@@ -62,7 +62,27 @@ ConvertDset -i _stat.1D -add_node_index -o_niml_asc -prefix stat.niml.dset >/dev
         -sublabel 0 'T#0' -sublabel 1 'F#1' stat.niml.dset >/dev/null 2>&1
 # The same statistics as GIfTI: Intent codes plus intent_p1..3 metadata.
 ConvertDset -i stat.niml.dset -o_gii_asc -prefix stat.gii.dset >/dev/null 2>&1
-rm -f _*.1D
+
+# Labels: a 4-entry colour lookup table (MakeColorMap's own example), as a
+# SUMA label table, and a node-label dataset that carries it (n % 4 + 1).
+printf '%s\n' '#integer label    String Label      R    G    B    A' \
+  ' 1 Big_House 0.3 0.1 1 1' ' 2 Small_Face 1 0.2 0.4 1' \
+  ' 3 Electric 1 1 0 1' ' 4 Atomic 0.1 1 0.3 1' > _colut.txt
+MakeColorMap -usercolutfile _colut.txt -suma_cmap toylut >/dev/null 2>&1
+awk 'BEGIN{for(n=0;n<42;n++) printf "%d\n", n%4+1}' > _lab.1D
+ConvertDset -i _lab.1D -add_node_index -o_niml_asc -prefix labels.niml.dset \
+            -labelize toylut.niml.cmap >/dev/null 2>&1
+
+# FDR curves on the stat dataset (FDRCURVE_000000, _000001).
+cp stat.niml.dset fdr.niml.dset
+3drefit -addFDR fdr.niml.dset >/dev/null 2>&1
+
+# A time series: 3 columns, v = n + c, TR = 2.5 s (SPARSE_DATA ni_timestep).
+awk 'BEGIN{for(n=0;n<42;n++) printf "%d %d %d\n", n, n+1, n+2}' > _ts.1D
+ConvertDset -i _ts.1D -add_node_index -o_niml_asc -prefix timeseries.niml.dset >/dev/null 2>&1
+3drefit -TR 2.5 timeseries.niml.dset >/dev/null 2>&1
+
+rm -f _*.1D _colut.txt
 # Node coordinates as SUMA reports them.
 SurfaceMetrics -i ico.asc -coords -prefix ico_ref >/dev/null 2>&1 || true
 
@@ -72,12 +92,15 @@ SurfaceMetrics -i ico.asc -coords -prefix ico_ref >/dev/null 2>&1 || true
 # for NIML and GIfTI: string bodies carry no byte counts (binary NIML only
 # counts numeric payloads). Never do this to a .HEAD, whose string attributes
 # do record their length.
-perl -0777 -pi -e 's/\[[^\]\[@: \n]*@[^\]\[: \n]*:/[afni-io@:/g' ./*.spec ./*.dset
+perl -0777 -pi -e 's/\[[^\]\[@: \n]*@[^\]\[: \n]*:/[afni-io@:/g' ./*.spec ./*.dset ./*.cmap
 
 # --- reference text dumps ----------------------------------------------------
 # Layout: node index, then one value per column. ConvertDset segfaults on
 # -prepend_node_index_1D for a dense .gii.dset (no NODE_INDEX array), so dense
 # files fall back to a plain dump with the row number as the node index.
+for d in *.niml.dset; do
+  3dinfo -label -nv -tr "$d" > "$d.info.txt" 2>/dev/null || true
+done
 for d in *.niml.dset *.gii.dset; do
   ConvertDset -i "$d" -o_1D_stdout -prepend_node_index_1D > "$d.dump.txt" 2>/dev/null \
     || ConvertDset -i "$d" -o_1D_stdout 2>/dev/null \

@@ -1,0 +1,57 @@
+<AFNI_labeltable
+  dset_type="LabelTableObject"
+  self_idcode="AFN_e_LGBhMXHZm7FjgCfIMypw"
+  domain_parent_idcode
+  geometry_parent_idcode
+  filename="toylut"
+  label="toylut"
+  flipped="0"
+  Sgn="0"
+  top_frac="0.000000"
+  M0=" 0.543210 0.543210 0.543210 0.000000"
+  Name="toylut"
+  ni_form="ni_group" >
+<SPARSE_DATA
+  ni_type="4*float,int,String"
+  ni_dimen="5"
+  data_type="LabelTableObject_data" >
+ 0.54321 0.54321 0.54321 0 0 "undefined"
+ 0.2980392 0.09803922 1 1 1 "Big_House"
+ 1 0.2 0.4 1 2 "Small_Face"
+ 1 1 0 1 3 "Electric"
+ 0.09803922 1 0.2980392 1 4 "Atomic"
+</SPARSE_DATA>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_RANGE"
+  alloc_max="8236" >
+ "0.098039 1.000000 4 2;0.098039 1.000000 1 3;0.000000 1.000000 3 1;0.000000 1.000000 0 1;0 4 0 4;0 0 -1 -1"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_LABS"
+  alloc_max="8196" >
+ "R;G;B;A;key;name"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_TYPE"
+  alloc_max="8204" >
+ "R_col;G_col;B_col;A_col;Node_Index_Label;Node_String_Label"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_STATSYM"
+  alloc_max="8202" >
+ "none;none;none;none;none;none"
+</AFNI_atr>
+
+</AFNI_labeltable>

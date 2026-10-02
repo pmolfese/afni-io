@@ -1,0 +1,25 @@
+
+Dataset File:    labelled+orig
+Identifier Code: AFN_IZUiaUlAe4un7nPvnqKLlA  Creation Date: Fri Oct  2 17:57:22 2026
+Template Space:  ORIG
+Dataset Type:    Func-Bucket (-fbuc)
+Byte Order:      LSB_FIRST [this CPU native = LSB_FIRST]
+Storage Mode:    BRIK
+Storage Space:   120 (120) bytes
+Geometry String: "MATRIX(1,0,0,0,0,1,0,0,0,0,1,0):4,5,6"
+Data Axes Tilt:  Plumb
+Data Axes Orientation:
+  first  (x) = Right-to-Left
+  second (y) = Anterior-to-Posterior
+  third  (z) = Inferior-to-Superior   [-orient RAI]
+R-to-L extent:     0.000     -to-     3.000 [L] -step-     1.000 mm [  4 voxels]
+A-to-P extent:     0.000     -to-     4.000 [P] -step-     1.000 mm [  5 voxels]
+I-to-S extent:     0.000     -to-     5.000 [S] -step-     1.000 mm [  6 voxels]
+Number of values stored at each pixel = 1
+  -- At sub-brick #0 '#0' datum type is byte:            0 to           119
+
+----- HISTORY -----
+[afni-io@: Fri Oct  2 17:57:21 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,1 -expr 'i+4*j+20*k' -datum byte -prefix u8
+[afni-io: Fri Oct  2 17:57:22 2026] {AFNI_26.2.08:macos_13_ARM} 3dcopy u8+orig labelled
+[afni-io: Fri Oct  2 17:57:22 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -labeltable ../real/labels/aparc+aseg_REN_all.niml.lt labelled+orig
+

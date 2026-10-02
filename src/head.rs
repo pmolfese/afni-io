@@ -505,6 +505,23 @@ impl Header {
         stats
     }
 
+    /// The label table in `VALUE_LABEL_DTABLE` (set by `3drefit
+    /// -labeltable`), which maps the integer values of a label volume such
+    /// as `aparc+aseg` to region names. The attribute holds a NIML
+    /// `VALUE_LABEL_DTABLE` element as text.
+    pub fn value_label_table(&self) -> Result<Option<crate::labels::LabelTable>> {
+        let Some(text) = self.string("VALUE_LABEL_DTABLE") else {
+            return Ok(None);
+        };
+        crate::labels::LabelTable::find(&crate::niml::parse_str(text.trim_end_matches('\0'))?)
+    }
+
+    /// Store `table` as `VALUE_LABEL_DTABLE`, as `3drefit -labeltable` does.
+    pub fn set_value_label_table(&mut self, table: &crate::labels::LabelTable) {
+        let text = crate::niml::serialize(&[table.to_value_label_dtable()]);
+        self.set("VALUE_LABEL_DTABLE", AttributeValue::String(text));
+    }
+
     /// The FDR curve for sub-brick `p` (`FDRCURVE_%06d`), if present.
     pub fn fdr_curve(&self, p: usize) -> Option<ThresholdCurve> {
         ThresholdCurve::from_values(&self.floats(&format!("FDRCURVE_{p:06}"))?)

@@ -41,6 +41,7 @@ lists the formulas.
 | `stat.nii` | NIfTI **with** the AFNI ecode-4 extension |
 | `stat_pure.nii` | the same data **without** the extension (`-pure`) |
 | `s16.nii.gz`, `lpi.nii`, `oblique.nii` | gzipped NIfTI, NIfTI with a non-RAI orientation, and an oblique NIfTI |
+| `labelled`, `labelled.nii` | `u8` with the aparc label table from `real/labels/` (`3drefit -labeltable`); `*.labeltable.txt` holds `3dinfo -labeltable` |
 
 The reference files for each dataset:
 
@@ -67,7 +68,16 @@ All of it comes from `CreateIcosahedron -ld 2` (42 nodes, 80 triangles).
   two states from `quickspec`, one non-anatomical with a `LocalDomainParent`.
 - **Datasets:** `dense_*` (42 rows), `sparse_*` (11 rows, nodes 0, 4, …, 40) and
   `stat.niml.dset` (`Ttest(10)`, `Ftest(2,30)`), also converted to
-  `stat.gii.dset` (`NIFTI_INTENT_TTEST`/`FTEST` with `intent_p1..2` metadata). Each is written as NIML ASCII
+  `stat.gii.dset` (`NIFTI_INTENT_TTEST`/`FTEST` with `intent_p1..2` metadata).
+- **Labels:** `toylut.niml.cmap`, a 4-entry SUMA label table (`MakeColorMap
+  -suma_cmap` from its own help example; it adds key 0 `undefined` and
+  stores colours as 8-bit fractions), and `labels.niml.dset`, node labels
+  `n % 4 + 1` with that table attached (`ConvertDset -labelize`).
+- **More datasets:** `fdr.niml.dset` (`stat` plus `3drefit -addFDR`) and
+  `timeseries.niml.dset` (3 columns, `v = n + c`, `3drefit -TR 2.5`, which
+  writes it back as binary). `*.info.txt` holds `3dinfo -label -nv -tr`.
+  Note that `3dinfo -label` on `labels.niml.dset` reports the label table's
+  first column (`R`), not the dataset's own label. Each is written as NIML ASCII
   (`_asc`), NIML binary (`_bi`) and GIfTI ASCII/B64/B64GZ.
 - **References:** `*.dump.txt` holds `ConvertDset -o_1D_stdout` output with the
   node index as the first column. `ico_ref.coord.1D.dset` holds `SurfaceMetrics -coords`.

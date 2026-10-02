@@ -9,7 +9,7 @@ fn assert_gii_matches_niml(gii_path: &Path, niml_path: &Path) {
     let gii = afni_io::gifti::Gifti::read(gii_path).expect("failed to read .gii.dset");
     let dset = afni_io::dset::NimlDataset::read(niml_path).expect("failed to read .niml.dset");
 
-    let ncols = dset.columns();
+    let ncols = dset.column_count();
     let nrows = dset.rows();
 
     // GIfTI stores the node index as its own NODE_INDEX array; skip it.

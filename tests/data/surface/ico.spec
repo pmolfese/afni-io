@@ -1,5 +1,5 @@
 # SUMA_CreateIcosahedron-main generated spec file
-#History: [afni-io Fri Oct  2 17:12:56 2026] CreateIcosahedron -ld 2 -rad 50 -prefix ico
+#History: [afni-io Fri Oct  2 17:57:26 2026] CreateIcosahedron -ld 2 -rad 50 -prefix ico
 
 #define the group
 	Group = Icosahedron

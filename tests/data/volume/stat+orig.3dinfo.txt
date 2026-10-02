@@ -1,6 +1,6 @@
 
 Dataset File:    stat+orig
-Identifier Code: AFN_PKDGESp2WMZHZ6ju4towWQ  Creation Date: Fri Oct  2 16:59:33 2026
+Identifier Code: AFN_bYGe1t7dCVdm4B_nYY6pEQ  Creation Date: Fri Oct  2 17:57:22 2026
 Template Space:  ORIG
 Dataset Type:    Func-Bucket (-fbuc)
 Byte Order:      LSB_FIRST [this CPU native = LSB_FIRST]
@@ -22,6 +22,6 @@ Number of time steps = 2  Time step = 1.00000none  Origin = 0.00000none
      statcode = fift;  statpar = 2 40
 
 ----- HISTORY -----
-[afni-io@: Fri Oct  2 16:59:33 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,2 -expr '(i+j+k)/4+t' -datum float -prefix stat
-[afni-io: Fri Oct  2 16:59:33 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -substatpar 0 fitt 23 -substatpar 1 fift 2 40 -sublabel 0 Tstat#0 -sublabel 1 Fstat*with*tildes stat+orig
+[afni-io@: Fri Oct  2 17:57:22 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:4,5,6,2 -expr '(i+j+k)/4+t' -datum float -prefix stat
+[afni-io: Fri Oct  2 17:57:22 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -substatpar 0 fitt 23 -substatpar 1 fift 2 40 -sublabel 0 Tstat#0 -sublabel 1 Fstat*with*tildes stat+orig
 

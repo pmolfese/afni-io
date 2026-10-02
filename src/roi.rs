@@ -12,7 +12,13 @@
 //! line prefixed by `#`); [`crate::niml::parse`] removes those prefixes before
 //! parsing, so both commented and bare files are accepted here.
 //!
+//! The numeric codes are kept as read, so files with codes SUMA does not
+//! define still round-trip; [`NodeRoi::drawing_type`], [`NodeRoi::side`],
+//! [`RoiDatum::action_kind`] and [`RoiDatum::element_kind`] give the typed
+//! meaning (the enums of `SUMA_define.h` and `suma_datasets.h`).
+//!
 //! References: `afni/src/SUMA/SUMA_Surface_IO.c:SUMA_OpenDrawnROI_NIML`,
+//! `afni/src/SUMA/SUMA_niml.c` (`SUMA_DrawnROI_to_NIMLDrawnROI`),
 //! `afni/src/SUMA/SUMA_define.h:SUMA_ROI_DATUM`.
 
 use std::collections::BTreeMap;
@@ -37,12 +43,157 @@ pub struct Rgba {
 /// One `SUMA_NIML_ROI_DATUM` record within a [`NodeRoi`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoiDatum {
-    /// The action code that produced this stroke (append, fill, join, …).
+    /// The action code that produced this stroke ([`BrushAction`]).
     pub action: i32,
-    /// The element-type code (node group, edge group, face group, segment).
+    /// The element-type code ([`RoiElementType`]).
     pub element_type: i32,
     /// The ordered list of node indices that make up this stroke.
     pub nodes: Vec<u32>,
+}
+
+/// How an ROI was drawn (`SUMA_ROI_DRAWING_TYPE`, the `Type` attribute).
+///
+/// SUMA replays the strokes of the three path types when it loads them;
+/// a collection is taken as a plain set of nodes (`SUMA_NIMLDrawnROI_to_DrawnROI`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoiDrawingType {
+    /// 0: an open path of connected nodes.
+    OpenPath,
+    /// 1: a closed path.
+    ClosedPath,
+    /// 2: a filled closed path.
+    FilledArea,
+    /// 3: a collection of nodes.
+    Collection,
+}
+
+impl RoiDrawingType {
+    /// Map a `Type` code onto a variant.
+    pub fn from_code(code: i32) -> Option<Self> {
+        Some(match code {
+            0 => Self::OpenPath,
+            1 => Self::ClosedPath,
+            2 => Self::FilledArea,
+            3 => Self::Collection,
+            _ => return None,
+        })
+    }
+
+    /// The `Type` code.
+    pub fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// What a stroke's node list describes (`SUMA_ROI_TYPE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoiElementType {
+    /// 1: a set of nodes.
+    NodeGroup = 1,
+    /// 2: a set of edges.
+    EdgeGroup = 2,
+    /// 3: a set of faces.
+    FaceGroup = 3,
+    /// 4: a series of connected nodes.
+    NodeSegment = 4,
+}
+
+impl RoiElementType {
+    /// Map a code onto a variant (0, `SUMA_ROI_Undefined`, gives `None`).
+    pub fn from_code(code: i32) -> Option<Self> {
+        Some(match code {
+            1 => Self::NodeGroup,
+            2 => Self::EdgeGroup,
+            3 => Self::FaceGroup,
+            4 => Self::NodeSegment,
+            _ => return None,
+        })
+    }
+
+    /// The code.
+    pub fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// The drawing action that produced a stroke (`SUMA_BRUSH_STROKE_ACTION`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrushAction {
+    /// 1: add the stroke.
+    AppendStroke = 1,
+    /// 2: add the stroke, or fill if it closes an area.
+    AppendStrokeOrFill = 2,
+    /// 3: join the path's ends.
+    JoinEnds = 3,
+    /// 4: fill the enclosed area.
+    FillArea = 4,
+}
+
+impl BrushAction {
+    /// Map a code onto a variant (0, `SUMA_BSA_Undefined`, gives `None`).
+    pub fn from_code(code: i32) -> Option<Self> {
+        Some(match code {
+            1 => Self::AppendStroke,
+            2 => Self::AppendStrokeOrFill,
+            3 => Self::JoinEnds,
+            4 => Self::FillArea,
+            _ => return None,
+        })
+    }
+
+    /// The code.
+    pub fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// A surface's hemisphere (`SUMA_SO_SIDE`, written by `SUMA_SideName`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// `L`.
+    Left,
+    /// `R`.
+    Right,
+    /// `LR`: both hemispheres.
+    Both,
+    /// `no_side`.
+    None,
+}
+
+impl Side {
+    /// Map a `Parent_side` string onto a variant, as `SUMA_SideType` does
+    /// (`side_error` and anything unknown give `None`).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "L" => Self::Left,
+            "R" => Self::Right,
+            "LR" => Self::Both,
+            "no_side" => Self::None,
+            _ => return None,
+        })
+    }
+
+    /// The name SUMA writes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Left => "L",
+            Self::Right => "R",
+            Self::Both => "LR",
+            Self::None => "no_side",
+        }
+    }
+}
+
+impl RoiDatum {
+    /// The stroke's action, if the code is one SUMA defines.
+    pub fn action_kind(&self) -> Option<BrushAction> {
+        BrushAction::from_code(self.action)
+    }
+
+    /// What the node list describes, if the code is one SUMA defines.
+    pub fn element_kind(&self) -> Option<RoiElementType> {
+        RoiElementType::from_code(self.element_type)
+    }
 }
 
 /// A single drawn ROI on a surface.
@@ -53,14 +204,15 @@ pub struct NodeRoi {
     /// The ID code of the surface this ROI was drawn on
     /// (`domain_parent_idcode` / `Parent_idcode_str`).
     pub domain_parent_idcode: Option<String>,
-    /// The hemisphere / side string (`Parent_side`), e.g. `L`, `R`.
+    /// The hemisphere / side string (`Parent_side`), e.g. `L`, `R`
+    /// ([`Side`]).
     pub parent_side: Option<String>,
     /// The human-readable ROI label (`Label`).
     pub label: String,
     /// The integer label assigned to the ROI (`iLabel`).
     pub integer_label: i32,
-    /// The drawing-type code (`Type`): 0 open path, 1 closed path, 2 filled,
-    /// 4 collection.
+    /// The drawing-type code (`Type`): 0 open path, 1 closed path, 2 filled
+    /// area, 3 collection ([`RoiDrawingType`]).
     pub roi_type: Option<i32>,
     /// The colour-plane name (`ColPlaneName`).
     pub color_plane: Option<String>,
@@ -125,6 +277,16 @@ impl NodeRoi {
             edge_thickness: parse_u32(attrs, "EdgeThickness")?,
             data,
         })
+    }
+
+    /// The drawing type, if `Type` is present and a code SUMA defines.
+    pub fn drawing_type(&self) -> Option<RoiDrawingType> {
+        RoiDrawingType::from_code(self.roi_type?)
+    }
+
+    /// The hemisphere, if `Parent_side` is present and a name SUMA defines.
+    pub fn side(&self) -> Option<Side> {
+        Side::from_name(self.parent_side.as_deref()?)
     }
 
     /// The sorted, de-duplicated set of node indices across all strokes.

@@ -157,14 +157,20 @@ fn spec_files_list_their_surfaces() {
 #[test]
 fn stat_niml_dset_matches_convertdset_dump() {
     let dset = NimlDataset::read(common::data("surface/stat.niml.dset")).unwrap();
-    assert_eq!(dset.stats, ["Ttest(10)", "Ftest(2,30)"]);
+    let stats: Vec<_> = dset
+        .column_stats()
+        .iter()
+        .map(|s| s.as_ref().unwrap().to_statsym())
+        .collect();
+    assert_eq!(stats, ["Ttest(10)", "Ftest(2,30)"]);
+    assert_eq!(dset.column_labels(), ["T#0", "F#1"]);
     let rows = common::read_numeric_dump("surface/stat.niml.dset.dump.txt");
     assert_eq!(rows.len(), dset.rows());
     for (r, row) in rows.iter().enumerate() {
         // Dump columns: node index, then one per data column.
         let node = dset.node_indices.as_ref().map_or(r as u32, |idx| idx[r]);
         assert_eq!(node as f64, row[0]);
-        for c in 0..dset.columns() {
+        for c in 0..dset.column_count() {
             assert!((dset.data.get(r, c).unwrap() - row[c + 1]).abs() < 1e-6);
         }
     }
@@ -180,7 +186,7 @@ fn convertdset_niml_dsets_match_their_dumps() {
         for (r, row) in rows.iter().enumerate() {
             let node = dset.node_indices.as_ref().map_or(r as u32, |idx| idx[r]);
             assert_eq!(node as f64, row[0], "{name} row {r}");
-            for c in 0..dset.columns() {
+            for c in 0..dset.column_count() {
                 assert_eq!(dset.data.get(r, c).unwrap(), row[c + 1], "{name} [{r},{c}]");
             }
         }
@@ -214,8 +220,8 @@ fn real_rois_and_label_tables_parse() {
     assert!(clusters.is_sparse());
     // Written by sumaru before it quoted String bodies: the unquoted,
     // multi-line history must still read whole.
-    let history = clusters.history.as_deref().unwrap();
+    let history = clusters.history().unwrap();
     assert!(history.starts_with("SurfClust -i "), "{history}");
     assert!(history.contains("-out_fulllist"), "{history}");
-    assert_eq!(clusters.labels, ["Cluster"]);
+    assert_eq!(clusters.column_labels(), ["Cluster"]);
 }

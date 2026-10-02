@@ -17,7 +17,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 | 3 | Stat metadata and the NIfTI AFNI extension | ✅ |
 | 4 | BRIK writing, `read_any`, housekeeping | ✅ |
 | 5 | NIML core parity | ✅ |
-| 6 | `.niml.dset` / ROI parity | ⬜ |
+| 6 | `.niml.dset` / ROI parity | ✅ |
 | 7 | GIfTI swap in sumaru | ⬜ |
 | 8 | Remaining formats | ⬜ |
 | 9 | AFNI talk protocol encoding | ⬜ |
@@ -130,6 +130,7 @@ What sumaru can now replace, and what to keep in sumaru's adapters:
 - [ ] sumaru only read `BRICK_TYPES[0]`/`BRICK_FLOAT_FACS[0]`. With afni-io, mixed-datum datasets and per-sub-brick factors work, and negative factors apply (sumaru ignored them)
 - [ ] Remove the `nifti` dependency (pulls in nalgebra/ndarray). Check `flate2` is still needed (`niml_debug.rs`)
 - [ ] NIML (after Phase 6): sumaru → afni-io names are `NimlNumericMatrix` → `NumericMatrix` (typed columns; `column_count`, `get`), `NimlMixedTable` → `MixedTable`, `NimlData::RoiDatums`/`TractDatums` → `NimlData::Records`, `parse_niml_bytes` → `niml::parse_bytes`, `serialize_niml_ascii` → `niml::serialize`, `serialize_niml_binary` → `niml::serialize_binary`, `expand_niml_type` → `niml::expand_ni_type`. The talk reader's parse-and-retry loop and `expected_binary_niml_message_len` (`afni.rs`) can become `niml::parse_stream`
+- [ ] sumaru writes ROI `Type="4"` for collections; SUMA's `Collection` is 3 (`SUMA_ROI_DRAWING_TYPE`), so SUMA gets an undefined drawing type. sumaru's cluster dsets also have no `self_idcode`
 - [ ] sumaru's NIML reader treats `ni_form="binary"` as host byte order; AFNI means big-endian (see Phase 5 log)
 - [ ] Later phases: GIfTI (Phase 7, drops `gifti-rs`), dset/ROI (Phase 6), spec/FreeSurfer/STC/tract/graph (Phase 8), talk protocol (Phase 9)
 
@@ -153,12 +154,20 @@ Public API changes:
 - `NimlValueType::TaylorTractDatum` is new.
 - `ni_type_string` groups repeats.
 
-## Phase 6 — `.niml.dset` / ROI parity ⬜
+## Phase 6 — `.niml.dset` / ROI parity ✅
 
-- [ ] `ni_timestep`, `FDRCURVE_*`, label tables (`VALUE_LABEL_DTABLE`), parent idcodes, keeping unknown `AFNI_atr` elements on round trip
-- [ ] Typed ROI enums: side, drawing type, element kind, brush action
-- [ ] Reuse `StatSpec` and `Header::from_niml` from Phase 3. `NimlDataset` should expose `stats()` and keep its `AFNI_atr`s as a `Header`, so unknown attributes round-trip
-- [ ] `split_semicolons` in `dset.rs` drops empty entries, so `COLMS_LABS`/`COLMS_STATSYM` can shift columns, the same bug `brick_labels` had (see log)
+- [x] `NimlDataset` keeps every `AFNI_atr` as a `Header` (`attributes`: FDR curves, history, `UNIQUE_VALS_*`, unknown attributes round-trip), plus `domain_parent_idcode`/`geometry_parent_idcode` (`~`/empty → None), `time_step` (`ni_timestep`), `label_table` (`AFNI_labeltable`), `other_attrs`, `other_elements`
+- [x] Positional column accessors: `column_labels/types/stats/ranges`, `history`, `node_for_row`; setters (reject `;`); `new`, `with_label_table`, `write_binary`. On write `COLMS_RANGE` is recomputed, missing `COLMS_TYPE` filled (`Generic_*`), missing `self_idcode` generated
+- [x] Fixed the `split_semicolons` bug that dropped empty entries and shifted columns
+- [x] New `labels` module: `LabelTable` reads/writes `VALUE_LABEL_DTABLE` (`.niml.lt`, `.HEAD`) and `AFNI_labeltable` (`.niml.cmap`, label dsets); `Header::value_label_table`/`set_value_label_table`
+- [x] Typed ROI meanings: `RoiDrawingType` (Collection = 3), `RoiElementType`, `BrushAction`, `Side`, as accessors over raw codes (unknown codes still round-trip). Fixed the crate's own doc ("4 collection")
+- [x] New fixtures: `labels.niml.dset`, `toylut.niml.cmap`, `fdr.niml.dset`, `timeseries.niml.dset`, `labelled+orig`/`labelled.nii`
+- [x] Checked against AFNI: written labels/FDR/time-series dsets (ASCII and binary) dump identically in `ConvertDset`, keep TR and FDR in `3dinfo`; a dataset built from scratch shows its labels, statcodes, TR and history
+- [x] `examples/inspect.rs` shows time step, column stats and label tables
+
+Public API changes:
+- `NimlDataset` fields `labels/types/ranges/stats/history` replaced by accessors over `attributes`.
+- `columns()` is now `column_count()`.
 
 ## Phase 7 — GIfTI swap in sumaru ⬜
 
@@ -188,6 +197,18 @@ Public API changes:
 Newest first. Record anything about AFNI, SUMA or sumaru behaviour that
 affects the design, with the phase it was found in.
 
+- **2026-10-02 · Phase 6.** SUMA's `Collection` drawing type is **3**
+  (`SUMA_define.h`), and SUMA writes the drawing type straight into `Type`
+  (`SUMA_DrawnROI_to_NIMLDrawnROI`). sumaru writes 4. SUMA replays strokes
+  only for types 0–2.
+- **2026-10-02 · Phase 6.** `ConvertDset -labelize` writes two
+  `COLMS_LABS`/`COLMS_TYPE` entries for a one-column label dataset, and
+  `3dinfo -label` on it reports the label table's `R` column: AFNI finds
+  `COLMS_LABS` anywhere in the tree. afni-io reads only the dataset's own
+  attributes. `MakeColorMap` adds key 0 `undefined` and quantises colours to
+  1/255. `3drefit -TR` on a `.niml.dset` rewrites it as binary.
+- **2026-10-02 · Phase 6.** `;` separates `COLMS_*` entries and has no
+  escape: AFNI reads a label `a; b` as `a`. The setters reject it.
 - **2026-10-02 · Phase 5.** **Bug fixed, byte order:** AFNI decides a binary
   body's byte order by substring and **defaults to big-endian** unless
   `ni_form` contains `lsb` (`niml_elemio.c`: `order=NI_MSB_FIRST`). afni-io
