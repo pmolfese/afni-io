@@ -1,0 +1,132 @@
+
+type = string-attribute
+name = HISTORY_NOTE
+count = 933
+'[afni-io@: Fri Oct  2 20:23:03 2026] ===================================\n[afni-io: Fri Oct  2 20:23:03 2026] === History of inputs to 3dcalc ===\n[afni-io: Fri Oct  2 20:23:03 2026] === Input a:\n[afni-io: Fri Oct  2 20:23:03 2026] === Input b:\n[afni-io: Fri Oct  2 20:23:03 2026] ===================================\n[afni-io: Fri Oct  2 20:23:03 2026] {AFNI_26.2.08:macos_13_ARM} 3dcalc -a jRandomDataset:20,20,20,1 -b jRandomDataset:20,20,20,1 -expr '(1-2*step(0.5-b))*fitt_p2t(0.00005+0.99990*a^(1+3*iszero(mod(i+j+k,5))),23)' -datum float -prefix _fdr_t\n[afni-io: Fri Oct  2 20:23:03 2026] {AFNI_26.2.08:macos_13_ARM} 3dbucket -prefix fdr _fdr_t+orig _fdr_f+orig\n[afni-io: Fri Oct  2 20:23:03 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -substatpar 0 fitt 23 -substatpar 1 fift 2 40 -sublabel 0 Tnull_sig -sublabel 1 Fnull_sig -addFDR fdr+orig\n[afni-io: Fri Oct  2 20:23:03 2026] 3dFDR -input fdr+orig -cdep -prefix fdr_zdep~
+
+type = string-attribute
+name = TYPESTRING
+count = 15
+'3DIM_HEAD_FUNC~
+
+type = string-attribute
+name = IDCODE_STRING
+count = 27
+'AFN_D8h24Sl_iitJG9PR87bcTA~
+
+type = string-attribute
+name = IDCODE_DATE
+count = 25
+'Fri Oct  2 20:23:03 2026~
+
+type = integer-attribute
+name = SCENE_DATA
+count = 8
+ 0 11 1 -999 -999
+ -999 -999 -999
+
+type = string-attribute
+name = LABEL_1
+count = 9
+'fdr_zdep~
+
+type = string-attribute
+name = LABEL_2
+count = 5
+'zyxt~
+
+type = string-attribute
+name = DATASET_NAME
+count = 5
+'zyxt~
+
+type = integer-attribute
+name = ORIENT_SPECIFIC
+count = 3
+ 0 3 4
+
+type  = float-attribute
+name  = ORIGIN
+count = 3
+              0              0              0
+
+type  = float-attribute
+name  = DELTA
+count = 3
+              1              1              1
+
+type  = float-attribute
+name  = IJK_TO_DICOM
+count = 12
+              1              0              0              0              0
+              1              0              0              0              0
+              1              0
+
+type  = float-attribute
+name  = IJK_TO_DICOM_REAL
+count = 12
+              1              0              0              0              0
+              1              0              0              0              0
+              1              0
+
+type  = float-attribute
+name  = BRICK_STATS
+count = 4
+      0.7068164       7.721761      0.6887855       7.721402
+
+type = integer-attribute
+name = DATASET_RANK
+count = 8
+ 3 2 0 0 0
+ 0 0 0
+
+type = integer-attribute
+name = DATASET_DIMENSIONS
+count = 5
+ 20 20 20 0 0
+
+type = integer-attribute
+name = BRICK_TYPES
+count = 2
+ 3 3
+
+type  = float-attribute
+name  = BRICK_FLOAT_FACS
+count = 2
+              0              0
+
+type = string-attribute
+name = BRICK_LABS
+count = 30
+'FDRz:Tnull_sig~FDRz:Fnull_sig~
+
+type = string-attribute
+name = BRICK_KEYWORDS
+count = 2
+'~~
+
+type  = float-attribute
+name  = BRICK_STATAUX
+count = 6
+              0              5              0              1              5
+              0
+
+type = string-attribute
+name = BRICK_STATSYM
+count = 18
+'Zscore();Zscore()~
+
+type = string-attribute
+name = TEMPLATE_SPACE
+count = 5
+'ORIG~
+
+type = integer-attribute
+name = INT_CMAP
+count = 1
+ 0
+
+type = string-attribute
+name = BYTEORDER_STRING
+count = 10
+'LSB_FIRST~

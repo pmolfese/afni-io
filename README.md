@@ -17,14 +17,20 @@ code); the only dependencies are
 | `dset` | Surface datasets (`AFNI_dataset`), incl. label datasets and time series | `.niml.dset` | ✅ | ✅ |
 | `labels` | Label tables (`VALUE_LABEL_DTABLE`, `AFNI_labeltable`) | `.niml.lt`, `.niml.cmap` | ✅ | ✅ |
 | `roi`  | Drawn surface ROIs (`Node_ROI`) | `.niml.roi` | ✅ | ✅ |
+| `graph` | FATCAT/SUMA network datasets (`Graph_Bucket`) | `.niml.dset` | ✅ | ✅ |
+| `tract` | FATCAT tract networks (`TAYLOR_TRACT_DATUM`) | `.niml.tract` | ✅ | ✅ |
 | `brik` | AFNI volume datasets (`.HEAD`/`.BRIK` pair), all 8 datum types | `.HEAD` + `.BRIK`/`.BRIK.gz` | ✅ | ✅ |
 | `head` | `.HEAD` attributes only (header of the pair) | `.HEAD` | ✅ | ✅ |
-| `spec` | SUMA surface spec files | `.spec` | ✅ | — |
+| `spec` | SUMA surface spec files, as SUMA resolves them (`Spec::resolve`) | `.spec` | ✅ | ✅ |
 | `surface` | FreeSurfer/SUMA ASCII surfaces | `.asc` | ✅ | ✅ |
 | `gifti` | GIfTI surface/data XML | `.gii`, `.gii.gz`, `.gii.dset` | ✅ | ✅ |
 | `nifti` | NIfTI-1 / NIfTI-2 volumes, with header extensions (incl. AFNI's) | `.nii`, `.nii.gz`, `.hdr`/`.img` | ✅ | ✅ |
 | `volume` | Either of the above through one API (`read_any`) | any of the above | ✅ | — |
 | `onedee` | Numeric text tables | `.1D` | ✅ | ✅ |
+| `talk` | AFNI ⇄ SUMA talk protocol encoding: port numbers, framing, `SUMA_ixyz`/`SUMA_ijk`/crosshair/`SUMA_irgba` elements (feature `talk`, no sockets) | TCP | ✅ | ✅ |
+| `freesurfer` | FreeSurfer binary triangle surfaces | `lh.white`, `rh.pial`, … | ✅ | ✅ |
+| `stc` | MNE source estimates (time series on vertices) | `.stc` | ✅ | ✅ |
+| `adapt` | Adapters into `afni-core` datasets | any of the above | ✅ | NIML only |
 
 An AFNI volume is one dataset stored as a `.HEAD`/`.BRIK` pair. `Brik::read`
 accepts any name AFNI does (`.HEAD`, `.BRIK`, `.BRIK.gz`, or `prefix+orig`,
@@ -144,10 +150,48 @@ implementation, and the NIfTI-1/NIfTI-2 and GIfTI 1.0 specifications. The
 readers are validated against real-world fixtures (nibabel's GIfTI test files
 in ASCII/Base64/GZipBase64 form and `example4d.nii.gz`).
 
+## Meaning lives in afni-core
+
+`afni-io` decodes and encodes files; what the decoded data *means* (p-values,
+FDR q-values, color maps, thresholds) is in
+[`afni-core`](https://github.com/pmolfese/afni-core), which this crate depends on.
+The `adapt` module converts decoded files into core types: `NimlDataset`,
+`Gifti`, `Volume` and `OneD` become an `afni_core::dataset::Dataset`, label tables
+become core label tables, and a core dataset can be written back through a
+`NimlEnvelope` that keeps every attribute core does not model. A drawn `NodeRoi` converts
+to a core `Roi` with `adapt::roi_to_core` (codes SUMA does not define are kept, and the
+attributes core cannot express travel in a `RoiEnvelope`, so writing back is lossless).
+`graph_to_core` / `graph_from_core` and `tracts_to_core` / `tracts_from_core` do the same for
+networks and tracts (pass the original file as the template to keep its history, links and
+grid datasets). `AFNI_IO_LIVE=1 cargo test` also hands the graphs we write back to `ConvertDset`. `StatKind` and
+`StatSpec` are defined in `afni-core` and re-exported from `afni_io::stat`.
+
+The two crates are separate repositories. `Cargo.toml` fetches `afni-core` from
+GitHub (tracking `main` for now; it will move to tagged releases), so a fresh
+clone of `afni-io` builds on its own.
+
+### Building against a local `afni-core`
+
+To edit both crates together, check them out side by side and create a
+git-ignored `.cargo/config.toml` in `afni-io` that patches the git dependency to
+the sibling checkout:
+
+```toml
+[patch."https://github.com/pmolfese/afni-core"]
+afni-core = { path = "../afni-core" }
+```
+
+```text
+afni_rust/
+  afni-core/
+  afni-io/
+```
+
 ## Testing
 
 ```sh
 cargo test                  # unit tests + committed fixtures
+cargo test --features talk  # also the AFNI/SUMA talk protocol (`afni_io::talk`)
 cargo test -- --ignored     # known gaps, each labelled with its roadmap phase
 AFNI_IO_REFERENCE_DIR=../sumaru/testing cargo test   # also large/private files
 ```

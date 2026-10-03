@@ -1,0 +1,29 @@
+<SUMA_crosshair
+  ni_form="ni_group" >
+<SUMA_crosshair_xyz
+  ni_type="float"
+  ni_dimen="3"
+  surface_idcode="surface-514eae48587dbc08"
+  surface_nodeid="79484" >
+ -39.15466
+ -24.8533
+ -0.5454788
+</SUMA_crosshair_xyz>
+
+<underlay_array
+  ni_type="float"
+  ni_dimen="1"
+  underlay_idcode="XYZ_EpNaQDmaOtcizseN1TiEVw"
+  vox_ijk="85 123 150"
+  has_taxis="n" >
+ 74
+</underlay_array>
+
+<v2s_node_array
+  ni_type="float"
+  ni_dimen="1"
+  surface_nodeid="79484" >
+ 48
+</v2s_node_array>
+
+</SUMA_crosshair>

@@ -28,6 +28,14 @@ pub fn data(relative: &str) -> PathBuf {
     path
 }
 
+/// Whether a committed fixture exists (no panic when it does not).
+pub fn data_exists(relative: &str) -> bool {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data")
+        .join(relative)
+        .exists()
+}
+
 /// Path to a reference fixture under `$AFNI_IO_REFERENCE_DIR`, or `None` (with
 /// a note on stderr) when the variable is unset.
 pub fn reference(relative: &str) -> Option<PathBuf> {

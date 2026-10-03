@@ -11,13 +11,19 @@
 //! | [`dset`] | Surface datasets (`AFNI_dataset`) | `.niml.dset` |
 //! | [`roi`]  | Drawn surface ROIs (`Node_ROI`) | `.niml.roi` |
 //! | [`labels`] | Label tables | `.niml.lt`, `.niml.cmap` |
+//! | [`graph`] | FATCAT/SUMA network datasets (`Graph_Bucket`) | `.niml.dset` |
+//! | [`tract`] | FATCAT tract networks (`TAYLOR_TRACT_DATUM`) | `.niml.tract` |
 //! | [`brik`] | AFNI volume datasets (`.HEAD`/`.BRIK` pair) | `.HEAD` + `.BRIK`/`.BRIK.gz` |
 //! | [`volume`] | AFNI or NIfTI volumes through one API | any of the above |
 //! | [`spec`] | SUMA surface spec files | `.spec` |
 //! | [`surface`] | FreeSurfer/SUMA ASCII surfaces | `.asc` |
+//! | [`freesurfer`] | FreeSurfer binary triangle surfaces | `lh.white`, `rh.pial`, … |
+//! | [`stc`] | MNE source estimates | `.stc` |
 //! | [`gifti`] | GIfTI surface/data XML | `.gii`, `.gii.gz`, `.gii.dset` |
 //! | [`nifti`] | NIfTI-1/2 volumes | `.nii`, `.nii.gz`, `.hdr`/`.img` |
 //! | [`onedee`] | AFNI numeric text tables | `.1D` |
+//! | `talk` | AFNI ⇄ SUMA talk protocol encoding (feature `talk`) | (TCP, no files) |
+//! | [`adapt`] | Adapters into `afni-core` datasets and label tables | (any of the above) |
 //!
 //! An AFNI volume is a single dataset stored as two files: a `.HEAD` of ASCII
 //! attributes and a `.BRIK` (optionally gzipped to `.BRIK.gz`) of binary voxel
@@ -40,14 +46,17 @@
 
 #![warn(missing_debug_implementations)]
 
+pub mod adapt;
 pub mod array;
 mod base64;
 pub mod brik;
 mod compress;
 pub mod dset;
 pub mod error;
+pub mod freesurfer;
 pub mod geometry;
 pub mod gifti;
+pub mod graph;
 pub mod head;
 pub mod labels;
 pub mod nifti;
@@ -56,7 +65,11 @@ pub mod onedee;
 pub mod roi;
 pub mod spec;
 pub mod stat;
+pub mod stc;
 pub mod surface;
+#[cfg(feature = "talk")]
+pub mod talk;
+pub mod tract;
 pub mod volume;
 mod xml;
 

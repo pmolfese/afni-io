@@ -1,6 +1,10 @@
 //! Statistic metadata and the NIfTI AFNI extension, against files written by
 //! AFNI (`3drefit -substatpar`, `3dAFNItoNIFTI`, `ConvertDset`).
 
+// These tests exercise the deprecated lenient `DataArray::stat`, to prove it keeps its
+// old behavior while callers migrate to `stat_with_origin`.
+#![allow(deprecated)]
+
 mod common;
 
 use afni_io::head::AttributeValue;

@@ -1,0 +1,1208 @@
+// PUBLIC DOMAIN NOTICE
+//
+// This file is part of afni-io, which was written by employees of the United
+// States Government (National Institutes of Health) as part of their official
+// duties. It is a "United States Government Work" (17 U.S.C. 105) and is in the
+// public domain; outside the US, rights are waived under CC0 1.0. See LICENSE.
+//
+// ---------------------------------------------------------------------------
+// WHAT THIS FILE IS
+//
+// Adapters between this crate's raw file types and `afni-core`'s format-neutral
+// `Dataset`:
+//
+//     NimlDataset  <-->  NimlEnvelope { core: Dataset, extras }
+//     Gifti        ---->  Dataset
+//     Volume       ---->  Dataset
+//     OneD         ---->  Dataset      (caller supplies the domain)
+//     NodeRoi      <-->  RoiEnvelope { core: Roi, extras }
+//     GraphBucket  <-->  afni_core::graph::Graph   (a template keeps the file's extras)
+//     TractNetwork <-->  afni_core::tract::TractSet
+//
+// HOW IT RELATES TO THE REST OF THE CRATE
+//
+// * This is the ONLY module that knows about both worlds. The dependency
+//   points `afni-io -> afni-core`; `afni-core` never sees NIML/HEAD syntax.
+// * Raw types (`NimlDataset`, `Header`, ...) keep every attribute so files
+//   round-trip. A core `Dataset` keeps only what it understands. Anything it
+//   does not understand travels in `NimlExtras`, bundled with the core dataset
+//   in a `NimlEnvelope`, so writing back loses nothing.
+//
+// POLICIES
+//
+// * A domain is never guessed. A dense NIML dataset's node count is its row
+//   count; a SPARSE one cannot say how many nodes the surface has, so the
+//   caller must pass `node_count`.
+// * Malformed metadata (a bad FDR curve, duplicate label keys, an out-of-domain
+//   index) is an error, not a silent drop.
+// * Integer data stays integer (narrower ints widen losslessly; a `u64` above
+//   `i64::MAX` is rejected). Float data keeps its width.
+// ---------------------------------------------------------------------------
+
+//! Adapters from file types to [`afni_core::dataset::Dataset`].
+
+use std::collections::BTreeMap;
+
+use afni_core::column::{ColumnData, ColumnRange, ColumnRole, DataColumn, RecordedRange};
+use afni_core::curve::ThresholdCurve as CoreCurve;
+use afni_core::dataset::{Dataset, DatasetKind, ParentIds};
+use afni_core::domain::{Domain, DomainId, SurfaceDomain, VolumeDomain};
+use afni_core::labels::{LabelEntry as CoreEntry, LabelTable as CoreTable};
+use afni_core::mapping::SampleMap;
+use afni_core::roi::{Roi as CoreRoi, RoiStroke as CoreStroke};
+use afni_core::stat::IntentOrigin;
+
+use crate::array::TypedArray;
+use crate::dset::NimlDataset;
+use crate::error::{Error, Result};
+use crate::gifti::{self, Gifti};
+use crate::graph::{GraphBucket, MatrixShape, NodeRow};
+use crate::head::{AttributeValue, Header};
+use crate::labels::{LabelEntry, LabelTable};
+use crate::niml::{NimlElement, NumericMatrix};
+use crate::onedee::OneD;
+use crate::roi::{NodeRoi, RoiDatum};
+use crate::stat::ThresholdCurve;
+use crate::surface::Surface;
+use crate::tract::{RawBundle, RawTract, TractNetwork};
+use crate::volume::Volume;
+
+/// Convert a core error into this crate's error type.
+fn core_err(e: afni_core::Error) -> Error {
+    Error::invalid(e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Small conversions shared by every adapter
+// ---------------------------------------------------------------------------
+
+/// Raw typed numbers -> core column values.
+///
+/// Small integers widen to `i32` (lossless). `u64` becomes `i64` if it fits.
+fn typed_to_column(array: &TypedArray) -> Result<ColumnData> {
+    Ok(match array {
+        TypedArray::UInt8(v) => ColumnData::Int32(v.iter().map(|&x| i32::from(x)).collect()),
+        TypedArray::Int8(v) => ColumnData::Int32(v.iter().map(|&x| i32::from(x)).collect()),
+        TypedArray::UInt16(v) => ColumnData::Int32(v.iter().map(|&x| i32::from(x)).collect()),
+        TypedArray::Int16(v) => ColumnData::Int32(v.iter().map(|&x| i32::from(x)).collect()),
+        TypedArray::Int32(v) => ColumnData::Int32(v.clone()),
+        TypedArray::UInt32(v) => ColumnData::UInt32(v.clone()),
+        TypedArray::Int64(v) => ColumnData::Int64(v.clone()),
+        TypedArray::UInt64(v) => ColumnData::Int64(
+            v.iter()
+                .map(|&x| {
+                    i64::try_from(x)
+                        .map_err(|_| Error::invalid(format!("u64 value {x} exceeds i64::MAX")))
+                })
+                .collect::<Result<_>>()?,
+        ),
+        TypedArray::Float32(v) => ColumnData::Float32(v.clone()),
+        TypedArray::Float64(v) => ColumnData::Float64(v.clone()),
+    })
+}
+
+/// Core column values -> raw typed numbers (for writing). Text has no numeric
+/// NIML form, so it is reported as unsupported rather than mangled.
+fn column_to_typed(data: &ColumnData) -> Result<TypedArray> {
+    Ok(match data {
+        ColumnData::Int32(v) => TypedArray::Int32(v.clone()),
+        ColumnData::UInt32(v) => TypedArray::UInt32(v.clone()),
+        ColumnData::Int64(v) => TypedArray::Int64(v.clone()),
+        ColumnData::Float32(v) => TypedArray::Float32(v.clone()),
+        ColumnData::Float64(v) => TypedArray::Float64(v.clone()),
+        ColumnData::Text(_) => {
+            return Err(Error::unsupported(
+                "text columns cannot be written to a numeric NIML dataset",
+            ))
+        }
+    })
+}
+
+/// Raw (unvalidated) threshold curve -> validated core curve.
+fn curve_to_core(raw: &ThresholdCurve) -> Result<CoreCurve> {
+    CoreCurve::new(raw.x0, raw.dx, raw.values.clone()).map_err(core_err)
+}
+
+/// What to do when a piece of metadata is malformed: an FDR/MDF curve (zero
+/// spacing, fewer than two samples, non-finite values) or a statistic (for
+/// example a correlation whose parameters fit neither AFNI's nor the NIfTI
+/// standard's convention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MetadataPolicy {
+    /// Fail the whole conversion with an error. The default, and what the
+    /// plain `*_to_core` functions do.
+    #[default]
+    Strict,
+    /// Leave that metadata off and record an [`AdaptWarning`], so the data stays
+    /// usable (for example in a viewer) while the problem is visible.
+    SkipWithWarning,
+}
+
+/// Former name of [`MetadataPolicy`], from when it covered only curves.
+pub type CurvePolicy = MetadataPolicy;
+
+/// Options for the `*_to_core_with` adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdaptOptions {
+    /// How malformed FDR/MDF curves are handled.
+    pub curves: MetadataPolicy,
+    /// How a malformed statistic is handled (see [`MetadataPolicy`]).
+    pub statistics: MetadataPolicy,
+    /// Who wrote NIfTI/GIfTI `intent_p1..3`. Only correlation depends on it.
+    /// [`IntentOrigin::Unknown`] (the default) classifies by structure, which is
+    /// correct for every file AFNI or a standards-following tool writes; set
+    /// `Afni` or `Standard` to override when the producer is known.
+    pub intent_origin: IntentOrigin,
+}
+
+/// Something that was dropped or altered during conversion without failing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptWarning {
+    /// Index of the column (or sub-brick) concerned.
+    pub column: usize,
+    /// What was affected, e.g. `"FDR curve"`.
+    pub what: &'static str,
+    /// Why, in plain words.
+    pub message: String,
+}
+
+/// Convert an optional raw curve under `policy`, pushing a warning if it is
+/// skipped. `Ok(None)` means "no curve" (absent, or skipped with a warning).
+fn curve_with_policy(
+    raw: Option<ThresholdCurve>,
+    policy: MetadataPolicy,
+    column: usize,
+    what: &'static str,
+    warnings: &mut Vec<AdaptWarning>,
+) -> Result<Option<CoreCurve>> {
+    let Some(raw) = raw else { return Ok(None) };
+    match (curve_to_core(&raw), policy) {
+        (Ok(curve), _) => Ok(Some(curve)),
+        (Err(e), MetadataPolicy::Strict) => Err(e),
+        (Err(e), MetadataPolicy::SkipWithWarning) => {
+            warnings.push(AdaptWarning {
+                column,
+                what,
+                message: e.to_string(),
+            });
+            Ok(None)
+        }
+    }
+}
+
+/// Validated core curve -> the raw attribute layout `[x0, dx, v0, v1, ...]`.
+fn curve_to_attr(curve: &CoreCurve) -> AttributeValue {
+    let mut v = vec![curve.x0(), curve.dx()];
+    v.extend_from_slice(curve.samples());
+    AttributeValue::Float(v)
+}
+
+/// Convert a raw label table into a core one, keeping integer keys and the
+/// file's order, and each color exactly as stored (colors read from 8-bit data
+/// stay `value / 255`; nothing is re-quantized). Fails if two entries share a
+/// key, since "what is label 7?" would then have no single answer.
+pub fn label_table_to_core(raw: &LabelTable) -> Result<CoreTable> {
+    labels_to_core(raw)
+}
+
+/// Raw label table -> core label table (validates unique keys).
+fn labels_to_core(raw: &LabelTable) -> Result<CoreTable> {
+    CoreTable::new(
+        raw.entries
+            .iter()
+            .map(|e| CoreEntry {
+                key: e.key,
+                name: e.name.clone(),
+                rgba: e.rgba,
+            })
+            .collect(),
+    )
+    .map_err(core_err)
+}
+
+/// Convert a core label table back to a raw one for writing, carrying `attrs`
+/// (the table element's extra attributes) over from an earlier raw table, or an
+/// empty map for a new one.
+pub fn label_table_from_core(core: &CoreTable, attrs: BTreeMap<String, String>) -> LabelTable {
+    labels_to_raw(core, attrs)
+}
+
+/// Core label table -> raw table, keeping `attrs` from an earlier raw table.
+fn labels_to_raw(core: &CoreTable, attrs: BTreeMap<String, String>) -> LabelTable {
+    LabelTable {
+        entries: core
+            .entries()
+            .iter()
+            .map(|e| LabelEntry {
+                key: e.key,
+                name: e.name.clone(),
+                rgba: e.rgba,
+            })
+            .collect(),
+        attrs,
+    }
+}
+
+/// An id string -> `Option<DomainId>`; blank means "no id".
+fn domain_id(text: Option<&str>) -> Option<DomainId> {
+    text.and_then(|t| DomainId::new(t).ok())
+}
+
+// ---------------------------------------------------------------------------
+// NIML surface datasets
+// ---------------------------------------------------------------------------
+
+/// What the core `Dataset` does not model, kept so a NIML dataset can be
+/// written back without losing attributes.
+///
+/// This is the "I/O-side envelope" from the roadmap: format syntax stays here,
+/// never in `afni-core`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NimlExtras {
+    /// The original `dset_type` attribute (e.g. `Node_Bucket`).
+    pub dset_type: String,
+    /// The `filename` attribute.
+    pub filename: Option<String>,
+    /// The `label` attribute.
+    pub label: Option<String>,
+    /// Other attributes of the `AFNI_dataset` element.
+    pub other_attrs: BTreeMap<String, String>,
+    /// Every `AFNI_atr` attribute as read (including ones core also models,
+    /// such as `COLMS_LABS`; the modelled ones are overwritten on write from
+    /// the core dataset, all others are kept).
+    pub attributes: Header,
+    /// The raw label table, kept for its extra attributes (`pbar_name`, ...).
+    pub label_table: Option<LabelTable>,
+    /// Child elements this crate does not interpret.
+    pub other_elements: Vec<NimlElement>,
+}
+
+/// A core dataset together with the raw extras of the file it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NimlEnvelope {
+    /// The format-neutral dataset; edit this.
+    pub core: Dataset,
+    /// Everything else, preserved for writing back.
+    pub extras: NimlExtras,
+}
+
+/// The core role for a SUMA `COLMS_TYPE` string.
+fn role_from_suma_type(t: &str) -> ColumnRole {
+    match t.trim() {
+        "Node_Index" => ColumnRole::NodeIndex,
+        "Node_Index_Label" => ColumnRole::Label,
+        "Generic_Float" | "Generic_Int" | "" => ColumnRole::Generic,
+        other => ColumnRole::Other(other.to_owned()),
+    }
+}
+
+/// The `COLMS_TYPE` string to write for a role. Roles with no SUMA name fall
+/// back to the generic type matching the data, as SUMA itself does.
+fn suma_type_for(role: &ColumnRole, data: &ColumnData) -> String {
+    match role {
+        ColumnRole::NodeIndex => "Node_Index".into(),
+        ColumnRole::Label => "Node_Index_Label".into(),
+        ColumnRole::Other(raw) => raw.clone(),
+        _ => match data {
+            ColumnData::Float32(_) | ColumnData::Float64(_) => "Generic_Float".into(),
+            _ => "Generic_Int".into(),
+        },
+    }
+}
+
+/// Convert a `.niml.dset` into a core dataset plus extras.
+///
+/// `node_count` is the number of nodes in the surface. It may be `None` only
+/// for a dense dataset (the row count is then the node count); a sparse
+/// dataset needs it because the file does not record it. If both are known and
+/// disagree, that is an error.
+///
+/// Malformed FDR/MDF curves are an error here; use [`niml_to_core_with`] to
+/// skip them with a warning instead.
+pub fn niml_to_core(dset: &NimlDataset, node_count: Option<usize>) -> Result<NimlEnvelope> {
+    niml_to_core_with(dset, node_count, &AdaptOptions::default()).map(|(env, _)| env)
+}
+
+/// Like [`niml_to_core`], with options, also returning any warnings.
+pub fn niml_to_core_with(
+    dset: &NimlDataset,
+    node_count: Option<usize>,
+    options: &AdaptOptions,
+) -> Result<(NimlEnvelope, Vec<AdaptWarning>)> {
+    let mut warnings = Vec::new();
+    // --- Domain and row mapping ------------------------------------------
+    let nodes =
+        match (dset.is_sparse(), node_count) {
+            (false, None) => dset.rows(),
+            (false, Some(n)) if n == dset.rows() => n,
+            (false, Some(n)) => {
+                return Err(Error::invalid(format!(
+                    "dense dataset has {} rows but the surface has {n} nodes",
+                    dset.rows()
+                )))
+            }
+            (true, Some(n)) => n,
+            (true, None) => return Err(Error::invalid(
+                "a sparse dataset needs `node_count`: the file does not record the surface size",
+            )),
+        };
+    let domain = Domain::Surface(
+        SurfaceDomain::new(domain_id(dset.domain_parent_idcode.as_deref()), nodes)
+            .map_err(core_err)?,
+    );
+    let map = match &dset.node_indices {
+        Some(idx) => SampleMap::indexed(idx.clone(), nodes).map_err(core_err)?,
+        None => SampleMap::dense(dset.rows()),
+    };
+
+    // --- Columns -----------------------------------------------------------
+    let types = dset.column_types();
+    let stats = dset.column_stats();
+    let ranges = dset.column_ranges();
+    let core_table = dset.label_table.as_ref().map(labels_to_core).transpose()?;
+
+    let mut columns = Vec::with_capacity(dset.column_count());
+    for (c, array) in dset.data.columns.iter().enumerate() {
+        let role = role_from_suma_type(&types[c]);
+        let recorded = ranges[c].and_then(|r| {
+            // A recorded range that is not a valid interval (e.g. AFNI's
+            // "0 0 -1 -1" placeholder is fine; NaN is not) cannot be modelled.
+            let range = ColumnRange::new(r.min, r.max).ok()?;
+            Some(RecordedRange {
+                range,
+                min_sample: u32::try_from(r.min_node).ok(),
+                max_sample: u32::try_from(r.max_node).ok(),
+            })
+        });
+        let mut column =
+            DataColumn::new(dset.column_label(c), role.clone(), typed_to_column(array)?)
+                .map_err(core_err)?
+                .with_stat(stats[c].clone())
+                .with_recorded_range(recorded)
+                .with_fdr_curve(curve_with_policy(
+                    dset.attributes.fdr_curve(c),
+                    options.curves,
+                    c,
+                    "FDR curve",
+                    &mut warnings,
+                )?)
+                .with_mdf_curve(curve_with_policy(
+                    dset.attributes.mdf_curve(c),
+                    options.curves,
+                    c,
+                    "MDF curve",
+                    &mut warnings,
+                )?);
+        // The label table describes every label-role column.
+        if role == ColumnRole::Label {
+            column = column.with_label_table(core_table.clone());
+        }
+        columns.push(column);
+    }
+
+    // --- Dataset-level ----------------------------------------------------
+    let kind = match dset.dset_type.as_str() {
+        "Node_Label" => DatasetKind::Label,
+        "Node_ROI" => DatasetKind::Roi,
+        "Node_Bucket" if dset.time_step.is_some() => DatasetKind::TimeSeries,
+        "Node_Bucket" => DatasetKind::Scalar,
+        other => DatasetKind::Other(other.to_owned()),
+    };
+    let core = Dataset::new(kind, domain, map, columns)
+        .map_err(core_err)?
+        .with_time_step_seconds(dset.time_step)
+        .map_err(core_err)?
+        .with_parent_ids(ParentIds {
+            self_id: dset.self_idcode.clone(),
+            domain_parent: dset.domain_parent_idcode.clone(),
+            geometry_parent: dset.geometry_parent_idcode.clone(),
+        });
+
+    let extras = NimlExtras {
+        dset_type: dset.dset_type.clone(),
+        filename: dset.filename.clone(),
+        label: dset.label.clone(),
+        other_attrs: dset.other_attrs.clone(),
+        attributes: dset.attributes.clone(),
+        label_table: dset.label_table.clone(),
+        other_elements: dset.other_elements.clone(),
+    };
+    Ok((NimlEnvelope { core, extras }, warnings))
+}
+
+impl NimlEnvelope {
+    /// Wrap a core dataset that did not come from a file, with default extras.
+    pub fn from_core(core: Dataset) -> Self {
+        let dset_type = match core.kind() {
+            DatasetKind::Label => "Node_Label",
+            DatasetKind::Roi => "Node_ROI",
+            DatasetKind::Other(s) => s.as_str(),
+            _ => "Node_Bucket",
+        }
+        .to_owned();
+        Self {
+            core,
+            extras: NimlExtras {
+                dset_type,
+                filename: None,
+                label: None,
+                other_attrs: BTreeMap::new(),
+                attributes: Header::default(),
+                label_table: None,
+                other_elements: Vec::new(),
+            },
+        }
+    }
+
+    /// Build the raw `NimlDataset` to write.
+    ///
+    /// Values, node indices, labels, types, statistics, curves, label table,
+    /// time step and parent ids come from the core dataset; every other raw
+    /// attribute comes from [`NimlExtras`]. `COLMS_RANGE` is recomputed from
+    /// the data by the NIML writer (see [`NimlDataset::to_element`]).
+    pub fn to_niml(&self) -> Result<NimlDataset> {
+        let core = &self.core;
+        let columns = core
+            .columns()
+            .iter()
+            .map(|c| column_to_typed(c.values()))
+            .collect::<Result<Vec<_>>>()?;
+        let data = NumericMatrix {
+            rows: core.row_count(),
+            columns,
+        };
+        let indices = match core.map() {
+            SampleMap::Dense { .. } => None,
+            SampleMap::Indexed { indices } => Some(indices.clone()),
+        };
+
+        let mut out = NimlDataset::new(self.extras.dset_type.clone(), data, indices);
+        out.self_idcode = core.parent_ids().self_id.clone();
+        out.domain_parent_idcode = core.parent_ids().domain_parent.clone();
+        out.geometry_parent_idcode = core.parent_ids().geometry_parent.clone();
+        out.filename = self.extras.filename.clone();
+        out.label = self.extras.label.clone();
+        out.other_attrs = self.extras.other_attrs.clone();
+        out.time_step = core.time_step_seconds();
+        out.attributes = self.extras.attributes.clone();
+        out.other_elements = self.extras.other_elements.clone();
+
+        // Column metadata owned by the core model.
+        let names: Vec<&str> = core.columns().iter().map(|c| c.label()).collect();
+        out.set_column_labels(&names)?;
+        // Keep the file's original COLMS_TYPE text where the role still means
+        // the same thing; otherwise derive it from the role.
+        let original = self.extras.attributes_column_types();
+        let types: Vec<String> = core
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| match original.get(i) {
+                Some(raw) if role_from_suma_type(raw) == *c.role() && !raw.is_empty() => {
+                    raw.clone()
+                }
+                _ => suma_type_for(c.role(), c.values()),
+            })
+            .collect();
+        out.set_column_types(&types)?;
+        let stats: Vec<_> = core.columns().iter().map(|c| c.stat().cloned()).collect();
+        out.set_column_stats(&stats);
+        for (i, c) in core.columns().iter().enumerate() {
+            if let Some(curve) = c.fdr_curve() {
+                out.attributes
+                    .set(format!("FDRCURVE_{i:06}"), curve_to_attr(curve));
+            }
+            if let Some(curve) = c.mdf_curve() {
+                out.attributes
+                    .set(format!("MDFCURVE_{i:06}"), curve_to_attr(curve));
+            }
+        }
+        // The label table: core's version wins; the raw table contributes its
+        // extra attributes.
+        let raw_attrs = self.extras.label_table.as_ref().map(|t| t.attrs.clone());
+        let core_table = core.columns().iter().find_map(|c| c.label_table());
+        out.label_table = match (core_table, &self.extras.label_table) {
+            (Some(t), _) => Some(labels_to_raw(t, raw_attrs.unwrap_or_default())),
+            (None, raw) => raw.clone(),
+        };
+        Ok(out)
+    }
+}
+
+impl NimlExtras {
+    /// The `COLMS_TYPE` entries of the original file, positionally.
+    fn attributes_column_types(&self) -> Vec<String> {
+        self.attributes
+            .string("COLMS_TYPE")
+            .map(|s| {
+                s.strip_suffix(';')
+                    .unwrap_or(s)
+                    .split(';')
+                    .map(|t| t.trim().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GIfTI
+// ---------------------------------------------------------------------------
+
+/// Convert the per-node data arrays of a GIfTI file into a dense core dataset.
+///
+/// Geometry arrays (`POINTSET`, `TRIANGLE`) are skipped. A `NODE_INDEX` array
+/// makes the dataset sparse, and then `node_count` is required (the file does
+/// not record the surface size); otherwise the dataset is dense and
+/// `node_count`, if given, must equal the array length.
+/// Every other array must be one-dimensional (`n` or `n x 1`) with the same
+/// `n`, which becomes the node count. Arrays with a statistical intent get a
+/// [`afni_core::stat::StatSpec`] taken from `intent_p1..3` exactly as
+/// [`gifti::DataArray::stat`] does (note the AFNI-versus-NIfTI correlation
+/// ambiguity recorded in the afni-core roadmap).
+///
+/// A statistic whose parameters cannot be read (for example a correlation fitting
+/// neither convention) is an error here; use [`gifti_to_core_with`] to skip it
+/// with a warning or to state who wrote the parameters.
+pub fn gifti_to_core(gii: &Gifti, node_count: Option<usize>) -> Result<Dataset> {
+    gifti_to_core_with(gii, node_count, &AdaptOptions::default()).map(|(ds, _)| ds)
+}
+
+/// Like [`gifti_to_core`], with options, also returning any warnings.
+pub fn gifti_to_core_with(
+    gii: &Gifti,
+    node_count: Option<usize>,
+    options: &AdaptOptions,
+) -> Result<(Dataset, Vec<AdaptWarning>)> {
+    let mut warnings = Vec::new();
+    let data_arrays: Vec<&gifti::DataArray> = gii
+        .data_arrays
+        .iter()
+        .filter(|a| {
+            !matches!(
+                a.intent,
+                gifti::intent::POINTSET | gifti::intent::TRIANGLE | gifti::intent::NODE_INDEX
+            )
+        })
+        .collect();
+    let first = data_arrays
+        .first()
+        .ok_or_else(|| Error::missing("GIfTI data arrays (only geometry found)"))?;
+    let nodes = first.dims.first().copied().unwrap_or(0);
+
+    // The label table of a .label.gii, shared by all label arrays.
+    let table = if gii.label_table.is_empty() {
+        None
+    } else {
+        Some(
+            CoreTable::new(
+                gii.label_table
+                    .iter()
+                    .map(|l| CoreEntry {
+                        key: i64::from(l.key),
+                        name: l.text.clone(),
+                        rgba: l.rgba,
+                    })
+                    .collect(),
+            )
+            .map_err(core_err)?,
+        )
+    };
+
+    let mut columns = Vec::new();
+    for (i, a) in data_arrays.iter().enumerate() {
+        let one_d = matches!(a.dims.as_slice(), [_] | [_, 1]);
+        if !one_d || a.dims[0] != nodes {
+            return Err(Error::unsupported(format!(
+                "GIfTI array {i} has dims {:?}; expected a vector of {nodes} values",
+                a.dims
+            )));
+        }
+        let is_label = a.intent == gifti::intent::LABEL;
+        let role = if is_label {
+            ColumnRole::Label
+        } else {
+            ColumnRole::Generic
+        };
+        let name = gifti::meta_get(&a.meta, "Name")
+            .filter(|n| !n.trim().is_empty())
+            .map_or_else(|| format!("col_{i}"), str::to_owned);
+        let stat = match a.stat_with_origin(options.intent_origin) {
+            Ok(stat) => stat,
+            Err(e) if options.statistics == MetadataPolicy::SkipWithWarning => {
+                warnings.push(AdaptWarning {
+                    column: i,
+                    what: "statistic",
+                    message: e.to_string(),
+                });
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        let mut c = DataColumn::new(name, role, typed_to_column(&a.data)?)
+            .map_err(core_err)?
+            .with_stat(stat);
+        if is_label {
+            c = c.with_label_table(table.clone());
+        }
+        columns.push(c);
+    }
+    let kind = if columns.iter().any(|c| *c.role() == ColumnRole::Label) {
+        DatasetKind::Label
+    } else {
+        DatasetKind::Scalar
+    };
+    // A NODE_INDEX array lists the node of each row (sparse data).
+    let index_array = gii
+        .data_arrays
+        .iter()
+        .find(|a| a.intent == gifti::intent::NODE_INDEX);
+    let (total, map) = match (index_array, node_count) {
+        (Some(a), Some(n)) => {
+            let indices = a
+                .data
+                .to_f64_vec()
+                .into_iter()
+                .map(|x| {
+                    // Exact, in-range integers only; no silent truncation.
+                    (x.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&x))
+                        .then_some(x as u32)
+                        .ok_or_else(|| Error::invalid(format!("bad node index {x}")))
+                })
+                .collect::<Result<Vec<u32>>>()?;
+            (n, SampleMap::indexed(indices, n).map_err(core_err)?)
+        }
+        (Some(_), None) => return Err(Error::invalid(
+            "a sparse GIfTI dataset needs `node_count`: the file does not record the surface size",
+        )),
+        (None, Some(n)) if n != nodes => {
+            return Err(Error::invalid(format!(
+                "dense GIfTI data has {nodes} values but the surface has {n} nodes"
+            )))
+        }
+        (None, _) => (nodes, SampleMap::dense(nodes)),
+    };
+    let domain = Domain::Surface(SurfaceDomain::new(None, total).map_err(core_err)?);
+    let ds = Dataset::new(kind, domain, map, columns).map_err(core_err)?;
+    Ok((ds, warnings))
+}
+
+// ---------------------------------------------------------------------------
+// Volumes
+// ---------------------------------------------------------------------------
+
+/// Convert every sub-brick of a volume into a dense core dataset on a
+/// [`VolumeDomain`], one `Float32` column per sub-brick.
+///
+/// The domain affine is the voxel-to-RAS matrix ([`Volume::ijk_to_ras`]).
+/// Statistics, FDR/MDF curves, and a value-label table come from the AFNI
+/// attributes when present. All sub-bricks must have been read (see
+/// [`crate::volume::read_any_volumes`]) and hold scalar data; otherwise this
+/// returns an error rather than a partial dataset.
+///
+/// Malformed FDR/MDF curves are an error here; use [`volume_to_core_with`] to
+/// skip them with a warning instead.
+pub fn volume_to_core(vol: &Volume) -> Result<Dataset> {
+    volume_to_core_with(vol, &AdaptOptions::default()).map(|(ds, _)| ds)
+}
+
+/// Like [`volume_to_core`], with options, also returning any warnings.
+pub fn volume_to_core_with(
+    vol: &Volume,
+    options: &AdaptOptions,
+) -> Result<(Dataset, Vec<AdaptWarning>)> {
+    let mut warnings = Vec::new();
+    let header = vol.afni_header()?;
+    let id = header.as_ref().and_then(|h| domain_id(h.idcode()));
+    let domain = Domain::Volume(
+        VolumeDomain::new(id, vol.dimensions(), vol.ijk_to_ras().ok()).map_err(core_err)?,
+    );
+
+    let labels = vol.labels()?;
+    let stats = match vol.stats_with_origin(options.intent_origin) {
+        Ok(stats) => stats,
+        Err(e) if options.statistics == MetadataPolicy::SkipWithWarning => {
+            warnings.push(AdaptWarning {
+                column: 0,
+                what: "statistic",
+                message: e.to_string(),
+            });
+            vec![None; vol.nvols()]
+        }
+        Err(e) => return Err(e),
+    };
+    let table = match &header {
+        Some(h) => h
+            .value_label_table()?
+            .as_ref()
+            .map(labels_to_core)
+            .transpose()?,
+        None => None,
+    };
+
+    let mut columns = Vec::with_capacity(vol.nvols());
+    for t in 0..vol.nvols() {
+        let frame = vol.frame_f32(t).ok_or_else(|| {
+            Error::unsupported(format!("sub-brick {t} was not read or has no scalar value"))
+        })?;
+        let role = if table.is_some() {
+            ColumnRole::Label
+        } else if stats[t].is_some() {
+            ColumnRole::Statistic
+        } else {
+            ColumnRole::Generic
+        };
+        let fdr = curve_with_policy(
+            header.as_ref().and_then(|h| h.fdr_curve(t)),
+            options.curves,
+            t,
+            "FDR curve",
+            &mut warnings,
+        )?;
+        let mdf = curve_with_policy(
+            header.as_ref().and_then(|h| h.mdf_curve(t)),
+            options.curves,
+            t,
+            "MDF curve",
+            &mut warnings,
+        )?;
+        columns.push(
+            DataColumn::new(labels[t].clone(), role, ColumnData::Float32(frame))
+                .map_err(core_err)?
+                .with_stat(stats[t].clone())
+                .with_fdr_curve(fdr)
+                .with_mdf_curve(mdf)
+                .with_label_table(table.clone()),
+        );
+    }
+
+    let time = header.as_ref().and_then(|h| h.time_axis());
+    let kind = match (&time, table.is_some()) {
+        (_, true) => DatasetKind::Label,
+        (Some(_), _) if vol.nvols() > 1 => DatasetKind::TimeSeries,
+        _ => DatasetKind::Scalar,
+    };
+    let mut ds = Dataset::dense(kind, domain, columns).map_err(core_err)?;
+    if let Some(axis) = &time {
+        if let Some(tr) = axis.tr_seconds().filter(|tr| *tr > 0.0) {
+            ds = ds.with_time_step_seconds(Some(tr)).map_err(core_err)?;
+        }
+        ds = ds
+            .with_time_start_seconds(Some(axis.origin))
+            .map_err(core_err)?;
+    }
+    Ok((ds, warnings))
+}
+
+// ---------------------------------------------------------------------------
+// Surfaces
+// ---------------------------------------------------------------------------
+
+/// Convert a decoded surface (`.asc`, GIfTI geometry, ...) into a core
+/// [`afni_core::mesh::SurfaceMesh`]: connectivity plus coordinates, ready for
+/// normals, areas, distance searches and clustering.
+///
+/// Fails if a triangle names a node that does not exist or a coordinate is not
+/// finite. Per-node and per-triangle flag columns (`Surface::vertex_flags`,
+/// `face_flags`) are file bookkeeping and are not carried over.
+pub fn surface_to_core(surface: &Surface) -> Result<afni_core::mesh::SurfaceMesh> {
+    afni_core::mesh::SurfaceMesh::from_triangles(surface.vertices.clone(), surface.faces.clone())
+        .map_err(core_err)
+}
+
+// ---------------------------------------------------------------------------
+// .1D tables
+// ---------------------------------------------------------------------------
+
+/// Convert a `.1D` table into a dense core dataset on `domain`, one `Float64`
+/// column per table column, named `col_0`, `col_1`, ...
+///
+/// A `.1D` file knows nothing about what its rows are, so the caller supplies
+/// the domain; the row count must equal the domain's sample count.
+pub fn onedee_to_core(table: &OneD, domain: Domain) -> Result<Dataset> {
+    let columns = (0..table.cols)
+        .map(|c| {
+            let values = table.column(c).ok_or_else(|| Error::missing("1D column"))?;
+            DataColumn::new(
+                format!("col_{c}"),
+                ColumnRole::Generic,
+                ColumnData::Float64(values),
+            )
+            .map_err(core_err)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Dataset::dense(DatasetKind::Scalar, domain, columns).map_err(core_err)
+}
+
+// ---------------------------------------------------------------------------
+// ROIs (.niml.roi)
+// ---------------------------------------------------------------------------
+
+/// What a `NodeRoi` holds that a core [`CoreRoi`] cannot express, so that writing
+/// the ROI back reproduces the file's attributes.
+///
+/// The core ROI always has a fill color, an edge color, an edge thickness and a
+/// drawing type; a file may omit any of them. The flags remember which were
+/// omitted. Identifiers are trimmed by core, so an id with stray spaces is kept
+/// verbatim here.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoiExtras {
+    /// The file had no `FillColor`.
+    pub fill_color_absent: bool,
+    /// The file had no `EdgeColor`.
+    pub edge_color_absent: bool,
+    /// The file had no `EdgeThickness`.
+    pub edge_thickness_absent: bool,
+    /// The file had no `Type`.
+    pub type_absent: bool,
+    /// The `self_idcode` exactly as written, when core's trimmed id differs.
+    pub self_idcode_raw: Option<String>,
+    /// The `domain_parent_idcode` exactly as written, when core's differs.
+    pub domain_parent_raw: Option<String>,
+}
+
+/// A core ROI together with what core cannot hold. Write it back with
+/// [`to_node_roi`](Self::to_node_roi).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoiEnvelope {
+    /// The ROI as `afni-core` understands it.
+    pub core: CoreRoi,
+    /// Everything else, for a faithful write.
+    pub extras: RoiExtras,
+}
+
+fn core_color(c: crate::roi::Rgba) -> afni_core::color::Rgba {
+    afni_core::color::Rgba {
+        r: c.r,
+        g: c.g,
+        b: c.b,
+        a: c.a,
+    }
+}
+
+fn raw_color(c: afni_core::color::Rgba) -> crate::roi::Rgba {
+    crate::roi::Rgba {
+        r: c.r,
+        g: c.g,
+        b: c.b,
+        a: c.a,
+    }
+}
+
+/// Convert a `NodeRoi` into a core ROI.
+///
+/// Codes that SUMA does not define (an unknown `Type`, element type or action)
+/// are kept as `Other(code)`, never dropped. A blank label is an error.
+pub fn roi_to_core(raw: &NodeRoi) -> Result<RoiEnvelope> {
+    let mut extras = RoiExtras::default();
+    let mut core = CoreRoi::new(raw.label.clone(), raw.integer_label).map_err(core_err)?;
+    core.source = afni_core::roi::RoiSource::NimlRoi;
+    core.draw_status = afni_core::roi::RoiDrawStatus::Finished;
+
+    // Identifiers: core trims them; remember the original if that changed it.
+    core.id = match &raw.self_idcode {
+        Some(text) => match afni_core::roi::RoiId::new(text.clone()) {
+            Ok(id) => {
+                if id.as_str() != text {
+                    extras.self_idcode_raw = Some(text.clone());
+                }
+                Some(id)
+            }
+            Err(_) => {
+                extras.self_idcode_raw = Some(text.clone());
+                None
+            }
+        },
+        None => None,
+    };
+    core.parent_domain = match &raw.domain_parent_idcode {
+        Some(text) => match DomainId::new(text.clone()) {
+            Ok(id) => {
+                if id.as_str() != text {
+                    extras.domain_parent_raw = Some(text.clone());
+                }
+                Some(id)
+            }
+            Err(_) => {
+                extras.domain_parent_raw = Some(text.clone());
+                None
+            }
+        },
+        None => None,
+    };
+    core.parent_side = raw
+        .parent_side
+        .as_deref()
+        .map(afni_core::roi::RoiSide::from_name);
+    core.color_plane = raw.color_plane.clone();
+    match raw.fill_color {
+        Some(c) => core.fill_color = core_color(c),
+        None => extras.fill_color_absent = true,
+    }
+    match raw.edge_color {
+        Some(c) => core.edge_color = core_color(c),
+        None => extras.edge_color_absent = true,
+    }
+    match raw.edge_thickness {
+        Some(t) => core.edge_thickness = t,
+        None => extras.edge_thickness_absent = true,
+    }
+    match raw.roi_type {
+        Some(code) => core.drawing_type = afni_core::roi::RoiDrawingType::from_code(code),
+        None => extras.type_absent = true,
+    }
+    core.strokes = raw
+        .data
+        .iter()
+        .map(|d| {
+            CoreStroke::new(
+                afni_core::roi::RoiElementKind::from_code(d.element_type),
+                afni_core::roi::RoiBrushAction::from_code(d.action),
+                d.nodes.clone(),
+            )
+        })
+        .collect();
+    Ok(RoiEnvelope { core, extras })
+}
+
+impl RoiEnvelope {
+    /// Rebuild the `NodeRoi`, including the attributes the file had and core
+    /// cannot hold. Converting a `NodeRoi` to core and back gives the same
+    /// `NodeRoi`.
+    pub fn to_node_roi(&self) -> NodeRoi {
+        let c = &self.core;
+        let x = &self.extras;
+        // Use the original text of an identifier if core's copy is unchanged.
+        let id_text = |core: Option<&str>, raw: &Option<String>| match (core, raw) {
+            (Some(t), Some(r)) if r.trim() == t => Some(r.clone()),
+            (Some(t), _) => Some(t.to_owned()),
+            (None, raw) => raw.clone(),
+        };
+        NodeRoi {
+            self_idcode: id_text(c.id.as_ref().map(|i| i.as_str()), &x.self_idcode_raw),
+            domain_parent_idcode: id_text(
+                c.parent_domain.as_ref().map(|d| d.as_str()),
+                &x.domain_parent_raw,
+            ),
+            parent_side: c.parent_side.as_ref().map(|s| s.name().to_owned()),
+            label: c.label.clone(),
+            integer_label: c.integer_label,
+            roi_type: (!x.type_absent).then(|| c.drawing_type.code()),
+            color_plane: c.color_plane.clone(),
+            fill_color: (!x.fill_color_absent).then(|| raw_color(c.fill_color)),
+            edge_color: (!x.edge_color_absent).then(|| raw_color(c.edge_color)),
+            edge_thickness: (!x.edge_thickness_absent).then_some(c.edge_thickness),
+            data: c
+                .strokes
+                .iter()
+                .map(|s| RoiDatum {
+                    action: s.action.code(),
+                    element_type: s.kind.code(),
+                    nodes: s.nodes.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Convert a core ROI into a `NodeRoi` with every attribute present (use
+/// [`RoiEnvelope::to_node_roi`] to reproduce a file that omitted some).
+pub fn roi_from_core(roi: &CoreRoi) -> NodeRoi {
+    RoiEnvelope {
+        core: roi.clone(),
+        extras: RoiExtras::default(),
+    }
+    .to_node_roi()
+}
+
+// ---------------------------------------------------------------------------
+// Graphs (Graph_Bucket) and tracts (.niml.tract)
+// ---------------------------------------------------------------------------
+
+/// Convert a `Graph_Bucket` file into a core [`afni_core::graph::Graph`].
+///
+/// Sparse graphs need their `INDEX_LIST`; its end nodes are node INDICES (the first
+/// column of `NODE_COORDS`), which core resolves to positions. A graph whose edge
+/// table does not fit its node count or layout is an error.
+pub fn graph_to_core(raw: &GraphBucket) -> Result<afni_core::graph::Graph> {
+    use afni_core::graph::{EdgeLayout, EdgeMeasure, Graph, GraphNode, SparseEdge};
+    let nodes = raw
+        .nodes
+        .iter()
+        .map(|n| GraphNode {
+            index: n.index,
+            position: n.xyz,
+            label: n.label.clone(),
+        })
+        .collect();
+    let layout = match raw.shape {
+        MatrixShape::Full => EdgeLayout::Full,
+        MatrixShape::Tri => EdgeLayout::LowerTriangle,
+        MatrixShape::TriDiag => EdgeLayout::LowerTriangleWithDiagonal,
+        MatrixShape::Sparse => {
+            let edges = raw
+                .edges
+                .as_ref()
+                .ok_or_else(|| Error::missing("INDEX_LIST of a sparse graph"))?;
+            EdgeLayout::Sparse(
+                edges
+                    .iter()
+                    .map(|&[id, row_node, column_node]| SparseEdge {
+                        id,
+                        row_node,
+                        column_node,
+                    })
+                    .collect(),
+            )
+        }
+    };
+    let measures = raw
+        .measures
+        .iter()
+        .zip(&raw.measure_labels)
+        .map(|(values, label)| EdgeMeasure {
+            label: label.clone(),
+            values: values.clone(),
+        })
+        .collect();
+    Graph::new(nodes, layout, measures).map_err(core_err)
+}
+
+/// Convert a core graph into a `Graph_Bucket` file model.
+///
+/// With a `template` (the file the graph came from) the file's other attributes,
+/// history and links are kept and only the numbers are replaced. Without one,
+/// the attributes AFNI expects are written fresh.
+pub fn graph_from_core(
+    graph: &afni_core::graph::Graph,
+    template: Option<&GraphBucket>,
+) -> GraphBucket {
+    use afni_core::graph::EdgeLayout;
+    let n = graph.node_count();
+    let (shape, edges) = match graph.layout() {
+        EdgeLayout::Full => (MatrixShape::Full, None),
+        EdgeLayout::LowerTriangle => (MatrixShape::Tri, None),
+        EdgeLayout::LowerTriangleWithDiagonal => (MatrixShape::TriDiag, None),
+        EdgeLayout::Sparse(list) => (
+            MatrixShape::Sparse,
+            Some(
+                list.iter()
+                    .map(|e| [e.id, e.row_node, e.column_node])
+                    .collect::<Vec<_>>(),
+            ),
+        ),
+    };
+    let attrs = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    };
+    let (root_attrs, data_attrs, edge_attrs, node_attrs, extras) = match template {
+        Some(t) => (
+            t.root_attrs.clone(),
+            t.data_attrs.clone(),
+            t.edge_attrs.clone(),
+            t.node_attrs.clone(),
+            t.extras.clone(),
+        ),
+        None => (
+            attrs(&[("dset_type", "Graph_Bucket"), ("ni_form", "ni_group")]),
+            attrs(&[("data_type", "Graph_Bucket_data")]),
+            attrs(&[("data_type", "Graph_Bucket_edge_indices")]),
+            attrs(&[("data_type", "Graph_Bucket_node_coordinates")]),
+            Vec::new(),
+        ),
+    };
+    GraphBucket {
+        root_attrs,
+        shape,
+        matrix_size: Some(format!(" {n} {n}")),
+        data_attrs,
+        measures: graph.measures().iter().map(|m| m.values.clone()).collect(),
+        measure_labels: graph.measures().iter().map(|m| m.label.clone()).collect(),
+        edges,
+        edge_attrs,
+        nodes: graph
+            .nodes()
+            .iter()
+            .map(|node| NodeRow {
+                index: node.index,
+                xyz: node.position,
+                label: node.label.clone(),
+            })
+            .collect(),
+        node_attrs,
+        extras,
+    }
+}
+
+/// Convert a tract network file into core tracts. A tract with no points or a
+/// non-finite coordinate is an error.
+pub fn tracts_to_core(raw: &TractNetwork) -> Result<afni_core::tract::TractSet> {
+    use afni_core::tract::{Tract, TractBundle, TractSet};
+    let bundles = raw
+        .bundles
+        .iter()
+        .map(|b| {
+            Ok(TractBundle {
+                tag: b.tag,
+                alt_tag: b.alt_tag,
+                ends: b.ends.clone(),
+                tracts: b
+                    .tracts
+                    .iter()
+                    .map(|t| Tract::new(t.id, t.points.clone()).map_err(core_err))
+                    .collect::<Result<Vec<_>>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(TractSet { bundles })
+}
+
+/// Convert core tracts into a tract network file model. With a `template` (the
+/// file they came from), the network's other attributes and its grid/FA datasets are
+/// kept, and each bundle keeps its extra attributes when the bundle counts agree.
+pub fn tracts_from_core(
+    set: &afni_core::tract::TractSet,
+    template: Option<&TractNetwork>,
+) -> TractNetwork {
+    let keep_bundle_attrs = template.is_some_and(|t| t.bundles.len() == set.bundles.len());
+    let bundles = set
+        .bundles
+        .iter()
+        .enumerate()
+        .map(|(i, b)| RawBundle {
+            tag: b.tag,
+            alt_tag: b.alt_tag,
+            ends: b.ends.clone(),
+            attrs: if keep_bundle_attrs {
+                template
+                    .map(|t| t.bundles[i].attrs.clone())
+                    .unwrap_or_default()
+            } else {
+                BTreeMap::new()
+            },
+            tracts: b
+                .tracts
+                .iter()
+                .map(|t| RawTract {
+                    id: t.id,
+                    points: t.points.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    TractNetwork {
+        root_attrs: template.map_or_else(
+            || {
+                let mut a = BTreeMap::new();
+                a.insert("ni_form".to_owned(), "ni_group".to_owned());
+                a
+            },
+            |t| t.root_attrs.clone(),
+        ),
+        bundles,
+        extras: template.map(|t| t.extras.clone()).unwrap_or_default(),
+    }
+}

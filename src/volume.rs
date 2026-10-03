@@ -125,7 +125,22 @@ impl Volume {
     /// Otherwise a NIfTI statistical intent applies to every volume, as in
     /// AFNI's `thd_niftiread.c`, except when `dim[5] > 1` (per-voxel
     /// parameters, which AFNI does not support either).
+    ///
+    /// For a header intent, correlation parameters are classified by structure
+    /// (see [`afni_core::stat::StatSpec::from_intent`]); a malformed set is an
+    /// error, not a missing statistic. Use
+    /// [`stats_with_origin`](Self::stats_with_origin) to state who wrote them.
     pub fn stats(&self) -> Result<Vec<Option<StatSpec>>> {
+        self.stats_with_origin(afni_core::stat::IntentOrigin::Unknown)
+    }
+
+    /// Like [`stats`](Self::stats), with the writer of a NIfTI header intent
+    /// stated. `origin` only affects header intents (never AFNI attributes) and
+    /// only correlation.
+    pub fn stats_with_origin(
+        &self,
+        origin: afni_core::stat::IntentOrigin,
+    ) -> Result<Vec<Option<StatSpec>>> {
         if let Some(h) = self.afni_header()? {
             let mut stats = h.brick_stats();
             stats.resize(self.nvols(), None);
@@ -136,14 +151,16 @@ impl Volume {
         };
         let h = &n.header;
         let per_voxel = h.shape().get(4).copied().unwrap_or(1) > 1;
-        let stat = (!per_voxel)
-            .then(|| {
-                StatSpec::from_nifti_intent(
-                    i64::from(h.intent_code),
-                    [h.intent_p1, h.intent_p2, h.intent_p3],
-                )
-            })
-            .flatten();
+        let stat = if per_voxel {
+            None
+        } else {
+            StatSpec::from_intent(
+                i64::from(h.intent_code),
+                [h.intent_p1, h.intent_p2, h.intent_p3],
+                origin,
+            )
+            .map_err(|e| Error::invalid(format!("NIfTI statistic: {e}")))?
+        };
         Ok(vec![stat; self.nvols()])
     }
 

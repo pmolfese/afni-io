@@ -1,0 +1,20 @@
+SpecFilePath: ./
+SpecFileName: same.spec
+1 surfaces in Spec, 1 defined states, 0 groups
+0) ./lh.smoothwm.asc 
+	MappingRef: 
+	Type: FreeSurfer
+	Format: ASCII
+	EmbedDim: 3
+	State: smoothwm, Group 
+	SureFitVolParam: (empty)
+	VolParName: (empty)
+	IDcode: (empty)
+	AnatCorrect: (empty)
+	Hemisphere: (empty)
+	DomainGrandParentID: (empty)
+	OriginatorID: (empty)
+	LocalCurvatureParent: ./lh.smoothwm.asc
+	LocalDomainParent: ./SAME
+	LabelDset: (empty)
+	NodeMarker: (empty)

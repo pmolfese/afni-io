@@ -10,10 +10,24 @@ keywords = ["afni", "suma", "neuroimaging", "niml", "brik"]
 categories = ["science", "parser-implementations"]
 
 [dependencies]
+# Semantic types (StatKind/StatSpec, and the Dataset model targeted by
+# `adapt`). Allowed direction: afni-io -> afni-core, never the reverse.
+#
+# Fetched from GitHub so a fresh clone of afni-io builds on its own. It tracks
+# `main` for now; switch to `tag = "v0.x.y"` once afni-core cuts releases. For
+# local co-development, a git-ignored `.cargo/config.toml` patches this to the
+# sibling checkout (see README, "Building").
+afni-core = { git = "https://github.com/pmolfese/afni-core", branch = "main" }
 thiserror = "2"
 # gzip/zlib/deflate for `.nii.gz` and GIfTI GZipBase64Binary payloads.
 # Its default backend (miniz_oxide) is pure Rust.
 flate2 = "1"
+
+[features]
+default = []
+# AFNI/SUMA talk protocol encoding (`afni_io::talk`): ports, framing and
+# the surface/crosshair/colour elements. Pure encoding; no sockets.
+talk = []
 
 [lints.rust]
 unsafe_code = "forbid"

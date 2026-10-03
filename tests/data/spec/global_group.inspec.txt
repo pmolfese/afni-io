@@ -1,0 +1,37 @@
+SpecFilePath: ./
+SpecFileName: global_group.spec
+2 surfaces in Spec, 1 defined states, 1 groups
+0) 
+	MappingRef: 
+	Type: GIFTI
+	Format: ASCII
+	EmbedDim: 3
+	State: a, Group first
+	SureFitVolParam: (empty)
+	VolParName: (empty)
+	IDcode: (empty)
+	AnatCorrect: (empty)
+	Hemisphere: (empty)
+	DomainGrandParentID: (empty)
+	OriginatorID: (empty)
+	LocalCurvatureParent: (empty)
+	LocalDomainParent: (empty)
+	LabelDset: (empty)
+	NodeMarker: (empty)
+1) 
+	MappingRef: 
+	Type: GIFTI
+	Format: ASCII
+	EmbedDim: 3
+	State: a, Group first
+	SureFitVolParam: (empty)
+	VolParName: (empty)
+	IDcode: (empty)
+	AnatCorrect: (empty)
+	Hemisphere: (empty)
+	DomainGrandParentID: (empty)
+	OriginatorID: (empty)
+	LocalCurvatureParent: (empty)
+	LocalDomainParent: (empty)
+	LabelDset: (empty)
+	NodeMarker: (empty)

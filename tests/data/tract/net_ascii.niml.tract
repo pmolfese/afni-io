@@ -1,0 +1,35 @@
+<network
+  N_tracts="6"
+  ni_form="ni_group" >
+<tracts
+  ni_type="TAYLOR_TRACT_DATUM"
+  ni_dimen="3"
+  Column_Labels="TaylorTract"
+  Bundle_Tag="7"
+  Bundle_Alt_Tag="3"
+  Bundle_Ends="A-B" >
+ 100 6 -20 15.25 0 -16.5 14.75 0.5
+ 103 12 -21 19.25 -6 -17.5 18.75 -5.5 -14 17.25 -5 -10.5 14.75 -4.5
+ 106 18 -22 23.25 -12 -18.5 22.75 -11.5 -15 21.25 -11 -11.5 18.75 -10.5 -8 15.25 -10 -4.5 10.75 -9.5
+</tracts>
+
+<tracts
+  ni_type="TAYLOR_TRACT_DATUM"
+  ni_dimen="2"
+  Column_Labels="TaylorTract"
+  Bundle_Tag="12" >
+ 109 9 -13 15.25 0 -9.5 14.75 1 -6 13.25 2
+ 112 15 -14 19.25 -6 -10.5 18.75 -5 -7 17.25 -4 -3.5 14.75 -3 0 11.25 -2
+</tracts>
+
+<tracts
+  ni_type="TAYLOR_TRACT_DATUM"
+  ni_dimen="1"
+  Column_Labels="TaylorTract"
+  Bundle_Tag="3"
+  Bundle_Alt_Tag="9"
+  Bundle_Ends="left to right" >
+ 115 3 -6 15.25 0
+</tracts>
+
+</network>

@@ -1,0 +1,112 @@
+<AFNI_dataset
+  dset_type="Graph_Bucket"
+  self_idcode="AFN_9L-rj2JcTdMf0bVEKs1M_w"
+  domain_parent_idcode
+  geometry_parent_idcode
+  filename="sparse.niml.dset"
+  label="sparse.niml.dset"
+  ni_form="ni_group" >
+<SPARSE_DATA
+  ni_type="2*float"
+  ni_dimen="3"
+  data_type="Graph_Bucket_data"
+  matrix_size=" 3 3"
+  matrix_shape="sparse" >
+ 1 10
+ 2 20
+ 3 30
+</SPARSE_DATA>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_RANGE"
+  alloc_max="8238" >
+ "1.000000 3.000000 0 2;10.000000 30.000000 0 2"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_LABS"
+  alloc_max="8208" >
+ "numeric;numeric"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_TYPE"
+  alloc_max="8220" >
+ "Generic_Float;Generic_Float"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_STATSYM"
+  alloc_max="8202" >
+ "none;none"
+</AFNI_atr>
+
+<INDEX_LIST
+  ni_type="3*int"
+  ni_dimen="3"
+  data_type="Graph_Bucket_edge_indices"
+  sorted_node_def="Yes"
+  COLMS_RANGE="0 2 0 2;5 8 0 2;5 7 2 1;"
+  COLMS_LABS="node index;P1 index;P2 index;"
+  COLMS_TYPE="Node_Index;Edge_P1_Index;Edge_P2_Index;" >
+ 0 5 6
+ 1 6 7
+ 2 8 5
+</INDEX_LIST>
+
+<AFNI_atr
+  ni_type="int"
+  ni_dimen="3"
+  atr_name="UNIQUE_INDICES_000000" >
+ 0
+ 1
+ 2
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="int"
+  ni_dimen="3"
+  atr_name="UNIQUE_INDICES_000001" >
+ 5
+ 6
+ 8
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="int"
+  ni_dimen="3"
+  atr_name="UNIQUE_INDICES_000002" >
+ 5
+ 6
+ 7
+</AFNI_atr>
+
+<NODE_COORDS
+  ni_type="int,3*float,String"
+  ni_dimen="4"
+  data_type="Graph_Bucket_node_coordinates"
+  COLMS_RANGE="5 8 0 3;0.000000 3.000000 0 3;-6.000000 10.000000 2 1;-4.000000 10.000000 1 2;;"
+  COLMS_LABS="Gnode Index;Gnode X;Gnode Y;Gnode Z;Gnode Label;"
+  COLMS_TYPE="GNode_Index;X_coord;Y_coord;Z_coord;Node_String_Label;" >
+ 5 0 0 0 "5"
+ 6 1 10 -4 "6"
+ 7 2 -6 10 "7"
+ 8 3 10 10 "8"
+</NODE_COORDS>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="HISTORY_NOTE" >
+ "[afni-io Sat Oct  3 00:35:04 2026] ConvertDset -i sparse.1D -graphize -multigraph -graph_nodelist_1d idx.1D xyz.1D -graph_edgelist_1d edges.1D -o_niml_asc -prefix sparse.niml.dset"
+</AFNI_atr>
+
+</AFNI_dataset>

@@ -1,0 +1,73 @@
+<AFNI_dataset
+  dset_type="Graph_Bucket"
+  self_idcode="AFN_5wJ1qH6hKr-QnCIvffC-6Q"
+  domain_parent_idcode
+  geometry_parent_idcode
+  filename="tri.niml.dset"
+  label="tri.niml.dset"
+  ni_form="ni_group" >
+<SPARSE_DATA
+  ni_type="float"
+  ni_dimen="6"
+  data_type="Graph_Bucket_data"
+  matrix_size=" 4 4"
+  matrix_shape="tri" >
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+</SPARSE_DATA>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_RANGE" >
+ "1.000000 6.000000 0 5"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_LABS" >
+ "numeric"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_TYPE" >
+ "Generic_Float"
+</AFNI_atr>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="COLMS_STATSYM" >
+ "none"
+</AFNI_atr>
+
+<INDEX_LIST
+  data_type="Graph_Bucket_edge_indices" />
+<NODE_COORDS
+  ni_type="int,3*float,String"
+  ni_dimen="4"
+  data_type="Graph_Bucket_node_coordinates"
+  COLMS_RANGE="0 3 0 3;0.000000 3.000000 0 3;-6.000000 10.000000 2 1;-4.000000 10.000000 1 2;;"
+  COLMS_LABS="Gnode Index;Gnode X;Gnode Y;Gnode Z;Gnode Label;"
+  COLMS_TYPE="GNode_Index;X_coord;Y_coord;Z_coord;Node_String_Label;" >
+ 0 0 0 0 "Alpha"
+ 1 1 10 -4 "Beta"
+ 2 2 -6 10 "Gamma"
+ 3 3 10 10 "Delta"
+</NODE_COORDS>
+
+<AFNI_atr
+  ni_type="String"
+  ni_dimen="1"
+  atr_name="HISTORY_NOTE" >
+ "[afni-io Sat Oct  3 00:35:04 2026] ConvertDset -i tri.1D -graphize -multigraph -graph_named_nodelist_txt names.txt xyz.1D -o_niml_asc -prefix tri.niml.dset"
+</AFNI_atr>
+
+</AFNI_dataset>

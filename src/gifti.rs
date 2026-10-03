@@ -291,18 +291,54 @@ impl DataArray {
 
     /// The statistic this array holds, from its `Intent` (a NIfTI intent
     /// code, which is also AFNI's stat code) and its `intent_p1`..`intent_p3`
-    /// metadata, as AFNI's GIfTI code writes them. `None` when the intent is
-    /// not a statistic (e.g. `NIFTI_INTENT_NONE`, `POINTSET`).
+    /// metadata. `None` when the intent is not a statistic (e.g.
+    /// `NIFTI_INTENT_NONE`, `POINTSET`).
+    ///
+    /// **Deprecated.** This swallows problems: a malformed correlation looks the same
+    /// as "not a statistic". It is kept, working, so existing callers keep compiling;
+    /// use [`stat_with_origin`](Self::stat_with_origin), which reports them.
+    #[deprecated(
+        since = "0.1.0",
+        note = "hides malformed statistic parameters as `None`; use `DataArray::stat_with_origin`, which returns a `Result`"
+    )]
     pub fn stat(&self) -> Option<crate::stat::StatSpec> {
-        let param = |key| {
-            meta_get(&self.meta, key)
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0.0)
+        self.stat_with_origin(afni_core::stat::IntentOrigin::Unknown)
+            .ok()
+            .flatten()
+    }
+
+    /// Like [`stat`](Self::stat), but says who wrote the parameters and reports
+    /// problems instead of hiding them.
+    ///
+    /// Only correlation depends on `origin` (AFNI's three-parameter
+    /// `Correl(samples, nfit, nort)` versus the NIfTI standard's one-parameter
+    /// form); see [`afni_core::stat::StatSpec::from_intent`]. With
+    /// [`IntentOrigin::Unknown`](afni_core::stat::IntentOrigin::Unknown) the two
+    /// are told apart by structure, which classifies every file either kind of
+    /// writer can produce and returns an error for anything else.
+    ///
+    /// A missing `intent_pN` entry counts as 0 (the NIfTI default), but one that
+    /// is present and not a number is an error.
+    pub fn stat_with_origin(
+        &self,
+        origin: afni_core::stat::IntentOrigin,
+    ) -> Result<Option<crate::stat::StatSpec>> {
+        let param = |key: &str| -> Result<f64> {
+            match meta_get(&self.meta, key) {
+                None => Ok(0.0),
+                Some(text) => text
+                    .trim()
+                    .parse()
+                    .map_err(|_| Error::invalid(format!("GIfTI {key} = {text:?} is not a number"))),
+            }
         };
-        crate::stat::StatSpec::from_nifti_intent(
-            i64::from(self.intent),
-            [param("intent_p1"), param("intent_p2"), param("intent_p3")],
-        )
+        let params = [
+            param("intent_p1")?,
+            param("intent_p2")?,
+            param("intent_p3")?,
+        ];
+        crate::stat::StatSpec::from_intent(i64::from(self.intent), params, origin)
+            .map_err(|e| Error::invalid(format!("GIfTI statistic: {e}")))
     }
 }
 

@@ -8,7 +8,12 @@ it live in `tests/common/mod.rs`.
 |-----------|------|--------|
 | `volume/` | Tiny 4×5×6 AFNI and NIfTI volumes, plus AFNI's own reference dumps | `make_volume_fixtures.sh` |
 | `surface/` | A 42-node icosahedron in several formats, and surface datasets | `make_surface_fixtures.sh` |
+| `graph/` | `Graph_Bucket` files written by `ConvertDset -graphize` from known inputs (full, LPI coordinates, triangular, sparse), with the inputs as `*.truth` | `make_graph_fixtures.sh` |
+| `tract/` | `.niml.tract` files (ASCII and binary) written by AFNI's own FATCAT code from a network built in memory, with that network and AFNI's `Tract_Length` values | `make_tract_fixtures.sh` (needs the AFNI source tree, `AFNI_SRC`) |
 | `real/` | Real AFNI/SUMA/sumaru output, copied from `sumaru/testing/` | see below |
+| `spec/` | Small `.spec` files (good ones that exercise inheritance, split surfaces, `MappingRef`, `SAME`, and `bad_*` ones AFNI refuses), with what `inspec` makes of each: its resolved fields (`*.inspec.txt`) and the spec its writer produces (`*.rewrite.spec`) | `make_spec_fixtures.sh` |
+| `talk/` | `afni -list_ports` under several offsets and environments, and two real messages AFNI sent SUMA (a `SUMA_crosshair` group; the first 10 rows of a `SUMA_irgba`), cut from a sumaru session recording | `make_talk_fixtures.sh` |
+| `roi_dataset/` | What `ROI2dataset` makes from the ROI files in `real/roi/` (dataset rows, drawn node order, padding), plus relabelled copies of one ROI | `make_roi_dataset_fixtures.sh` |
 
 Both scripts were last run with **AFNI_26.2.08** (macOS ARM). They need AFNI on
 `PATH`, are idempotent, and remove their previous output first:
@@ -16,6 +21,11 @@ Both scripts were last run with **AFNI_26.2.08** (macOS ARM). They need AFNI on
 ```sh
 tests/data/make_volume_fixtures.sh
 tests/data/make_surface_fixtures.sh
+tests/data/make_roi_dataset_fixtures.sh   # ROI2dataset reference output
+tests/data/make_graph_fixtures.sh         # Graph_Bucket files from ConvertDset
+tests/data/make_spec_fixtures.sh          # inspec's view of tests/data/spec/*.spec
+tests/data/make_talk_fixtures.sh          # AFNI's port tables, plus AFNI talk messages (needs SUMARU_NIML_RECORDING)
+AFNI_SRC=~/Documents/Programming/afni tests/data/make_tract_fixtures.sh   # .niml.tract files from TrackIO.c
 ```
 
 ## `volume/`
@@ -41,6 +51,8 @@ lists the formulas.
 | `stat.nii` | NIfTI **with** the AFNI ecode-4 extension |
 | `stat_pure.nii` | the same data **without** the extension (`-pure`) |
 | `s16.nii.gz`, `lpi.nii`, `oblique.nii` | gzipped NIfTI, NIfTI with a non-RAI orientation, and an oblique NIfTI |
+| `correl`, `correl.nii`, `correl_pure.nii`, `correl_standard.nii` | AFNI `Correl(30,2,1)` (3 parameters) in `.HEAD`, with the AFNI extension, pure (AFNI copies its parameters into `intent_p1..3`), and a header patched to the NIfTI standard's one-parameter form (`intent_p1 = 18`, p2 = p3 = 0) |
+| `fdr`, `fdr_z`, `fdr_zdep` | 20x20x20 null-plus-signal bucket (#0 t(23), #1 F(2,40)) with AFNI's own `FDRCURVE_*`/`MDFCURVE_*` (`3drefit -addFDR`), and `3dFDR` z-score output (default and `-cdep`). `fdr+orig.fdrval.txt` holds `fdrval` lookups in both directions. The data are random (`jRandomDataset`): regenerating changes them and every reference together |
 | `labelled`, `labelled.nii` | `u8` with the aparc label table from `real/labels/` (`3drefit -labeltable`); `*.labeltable.txt` holds `3dinfo -labeltable` |
 
 The reference files for each dataset:

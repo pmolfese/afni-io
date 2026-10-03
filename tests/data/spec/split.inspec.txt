@@ -1,0 +1,38 @@
+Note SUMA_Read_SpecFile: Found SurfaceVolume in Spec File, Name must include path to volume.
+SpecFilePath: ./
+SpecFileName: split.spec
+2 surfaces in Spec, 2 defined states, 1 groups
+0) ./lh.fiducial.coord ./lh.closed.topo 
+	MappingRef: 
+	Type: SureFit
+	Format: ASCII
+	EmbedDim: 3
+	State: fiducial, Group SureFitSubj
+	SureFitVolParam: ./lh.params
+	VolParName: anat+orig.HEAD
+	IDcode: (empty)
+	AnatCorrect: (empty)
+	Hemisphere: B
+	DomainGrandParentID: DGP_1
+	OriginatorID: ORIG_1
+	LocalCurvatureParent: ./SAME
+	LocalDomainParent: ./SAME
+	LabelDset: ./lh.parc.niml.dset
+	NodeMarker: ./lh.marks.niml.dset
+1) ./lh.inflated.coord ./lh.closed.topo 
+	MappingRef: 
+	Type: SureFit
+	Format: ASCII
+	EmbedDim: 3
+	State: inflated, Group SureFitSubj
+	SureFitVolParam: ./lh.params
+	VolParName: (empty)
+	IDcode: (empty)
+	AnatCorrect: (empty)
+	Hemisphere: (empty)
+	DomainGrandParentID: (empty)
+	OriginatorID: (empty)
+	LocalCurvatureParent: ./lh.fiducial.coord
+	LocalDomainParent: ./lh.fiducial.coord
+	LabelDset: (empty)
+	NodeMarker: (empty)

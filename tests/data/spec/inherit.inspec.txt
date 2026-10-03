@@ -1,0 +1,54 @@
+SpecFilePath: ./
+SpecFileName: inherit.spec
+3 surfaces in Spec, 3 defined states, 1 groups
+0) ./lh.smoothwm.asc 
+	MappingRef: 
+	Type: FreeSurfer
+	Format: ASCII
+	EmbedDim: 3
+	State: smoothwm, Group subj
+	SureFitVolParam: (empty)
+	VolParName: (empty)
+	IDcode: (empty)
+	AnatCorrect: Y
+	Hemisphere: L
+	DomainGrandParentID: (empty)
+	OriginatorID: (empty)
+	LocalCurvatureParent: (empty)
+	LocalDomainParent: (empty)
+	LabelDset: (empty)
+	NodeMarker: (empty)
+1) ./lh.pial.asc 
+	MappingRef: 
+	Type: FreeSurfer
+	Format: ASCII
+	EmbedDim: 3
+	State: smoothwm, Group subj
+	SureFitVolParam: (empty)
+	VolParName: (empty)
+	IDcode: (empty)
+	AnatCorrect: Y
+	Hemisphere: (empty)
+	DomainGrandParentID: (empty)
+	OriginatorID: (empty)
+	LocalCurvatureParent: ./lh.smoothwm.asc
+	LocalDomainParent: ./lh.smoothwm.asc
+	LabelDset: (empty)
+	NodeMarker: (empty)
+2) ./lh.inflated.asc 
+	MappingRef: 
+	Type: FreeSurfer
+	Format: ASCII
+	EmbedDim: 2
+	State: inflated, Group subj
+	SureFitVolParam: (empty)
+	VolParName: (empty)
+	IDcode: (empty)
+	AnatCorrect: (empty)
+	Hemisphere: (empty)
+	DomainGrandParentID: (empty)
+	OriginatorID: (empty)
+	LocalCurvatureParent: ./lh.smoothwm.asc
+	LocalDomainParent: ./lh.smoothwm.asc
+	LabelDset: (empty)
+	NodeMarker: (empty)

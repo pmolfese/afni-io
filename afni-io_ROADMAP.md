@@ -19,8 +19,8 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 | 5 | NIML core parity | ✅ |
 | 6 | `.niml.dset` / ROI parity | ✅ |
 | 7 | GIfTI swap in sumaru | ⬜ |
-| 8 | Remaining formats | ⬜ |
-| 9 | AFNI talk protocol encoding | ⬜ |
+| 8 | Remaining formats | ✅ |
+| 9 | AFNI talk protocol encoding | ✅ |
 | 10 | Beyond sumaru's current needs | ⬜ |
 | — | Moving sumaru onto afni-io (you, separately) | ⬜ see checklist |
 
@@ -132,7 +132,9 @@ What sumaru can now replace, and what to keep in sumaru's adapters:
 - [ ] NIML (after Phase 6): sumaru → afni-io names are `NimlNumericMatrix` → `NumericMatrix` (typed columns; `column_count`, `get`), `NimlMixedTable` → `MixedTable`, `NimlData::RoiDatums`/`TractDatums` → `NimlData::Records`, `parse_niml_bytes` → `niml::parse_bytes`, `serialize_niml_ascii` → `niml::serialize`, `serialize_niml_binary` → `niml::serialize_binary`, `expand_niml_type` → `niml::expand_ni_type`. The talk reader's parse-and-retry loop and `expected_binary_niml_message_len` (`afni.rs`) can become `niml::parse_stream`
 - [ ] sumaru writes ROI `Type="4"` for collections; SUMA's `Collection` is 3 (`SUMA_ROI_DRAWING_TYPE`), so SUMA gets an undefined drawing type. sumaru's cluster dsets also have no `self_idcode`
 - [ ] sumaru's NIML reader treats `ni_form="binary"` as host byte order; AFNI means big-endian (see Phase 5 log)
-- [ ] Later phases: GIfTI (Phase 7, drops `gifti-rs`), dset/ROI (Phase 6), spec/FreeSurfer/STC/tract/graph (Phase 8), talk protocol (Phase 9)
+- [ ] Talk protocol (Phase 9; enable `afni-io` feature `talk`): `resolve_afni_port_config` / `resolve_drivesuma_port_config` / `npb_to_np` / `port_offset_to_bloc` → `talk::Ports`, `offset_from_env`, `offset_from_bloc`; `surface_registration_elements` → `talk::surface_elements` (or `registration_bytes`, which adds the keep/pause-reading instructions); `surface_crosshair_element` → `talk::Crosshair::on_surface(..).to_element()`; `AfniRgbaOverlay` → `talk::Irgba`; `surface_crosshair_from_group` → `talk::CrosshairMessage::from_element`; `drive_afni_command_element` → `talk::drive_afni_element`; `expected_binary_niml_message_len` and the parse-and-retry loop → `talk::MessageReader`. Keep in sumaru: sockets and threads, `SurfaceMesh` → `Geometry` (vertices, normals, triangles; flip x/y with `talk::flip_xy` for GIfTI), DriveSuma parsing, routing. Behaviour to fix on the way: drop `AFNI_NIML_FIRST_PORT` (AFNI ignores it), and add the 65500 / 2686 limits (see Phase 9 log)
+- [ ] Spec, FreeSurfer, STC (Phase 8): sumaru's `io/freesurfer.rs` → `freesurfer::FreeSurferSurface` (same limits plus AFNI's; it also errors on a NaN coordinate and keeps the footer), `io/stc.rs` → `stc::Stc` (`time_points`, `tmin`/`tstep` in seconds; `to_dataset()` for the dataset). Spec reading in sumaru → `Spec::resolve`
+- [ ] Later phases: GIfTI (Phase 7, drops `gifti-rs`), dset/ROI (Phase 6)
 
 ## Phase 5 — NIML core parity ✅
 
@@ -175,14 +177,33 @@ Public API changes:
 - [ ] Helpers to detect data columns; FDR curves stored in metadata
 - [ ] Port sumaru's `io/gifti.rs` and the GIfTI parts of `surface.rs`/`color.rs`; remove `gifti-rs`
 
-## Phase 8 — Remaining formats ⬜
+## Phase 8 — Remaining formats ✅
 
-- [ ] Detailed `.spec` handling (path normalisation, states, hemisphere), plus writing
-- [ ] Binary FreeSurfer surfaces, MNE `.stc`, `.niml.tract`, `Graph_Bucket`
+- [x] **`.niml.tract`** (`tract`) and **`Graph_Bucket`** (`graph`): done earlier, with fixtures written by AFNI (`tests/graph_tract.rs`)
+- [x] **`.spec` handling** (`spec`): `Spec::resolve` returns each surface as SUMA understands it (`ResolvedSurface`): inheritance from the previous surface, defaults, the spec directory put in front of file names, `MappingRef` folded into the parents, `SAME`, and SUMA's checks. `Spec::from_resolved` + `Spec::to_text` / `write` write a spec the way `SUMA_Write_SpecFile` does. Checked against `inspec` (`tests/spec_conformance.rs`): all 5 good specs resolve to the same fields as `inspec -detail 3`; the specs we write are byte-identical to `inspec -prefix`'s; all 11 bad specs are refused as AFNI refuses them; a spec AFNI wrote (`ico.spec`) and the template's (`std.141…`) are written back unchanged
+- [x] **Binary FreeSurfer surfaces** (`freesurfer`): `FreeSurferSurface` reads and writes the big-endian triangle format, with AFNI's limits (5000-byte comment, 2,000,000 vertices or triangles, no quads). The volume-geometry footer is kept as bytes (`footer_values` picks out `key = a b c` lines). Tests use bytes spelled out by hand; with `AFNI_IO_LIVE=1`, `ConvertSurface -i_fs` reads what we write and gives the same mesh
+- [x] **MNE `.stc`** (`stc`): `Stc` reads and writes the big-endian format (times in ms on disk, seconds here; values time-major), and `to_dataset()` makes a sparse `NimlDataset` with `ni_timestep`. AFNI has no `.stc` reader, so tests use hand-built bytes
+- [x] **`.stc` checked against a real file:** an MNE oct6 cluster mask (4098 vertices × 316 times, 300 Hz, `tmin` −0.25 s) parses, every value is finite, and writing it back is byte-identical. The file is not in the repo
 
-## Phase 9 — AFNI talk protocol encoding ⬜
+Public API changes:
+- `Spec::parse` now fails on a line that is not `Key = Value` (SUMA does), and treats any line containing `#` as a comment (SUMA does), not only lines that start with one.
+- New: `spec::{ResolvedSurface, Hemisphere}`, `Spec::{resolve, from_resolved, to_text, write, states}`, `freesurfer`, `stc`.
 
-- [ ] Behind a `talk` feature: port numbering, message framing, `SUMA_ixyz`/`SUMA_ijk`/crosshair element builders. Sockets stay in sumaru
+## Phase 9 — AFNI talk protocol encoding ✅
+
+Behind the `talk` feature (`cargo test --features talk`); `afni_io::talk` is
+pure encoding and never opens a socket. Checked against AFNI's source
+(`afni_ports.c`, `afni_niml.c`, `SUMA_niml.c`, `niml_elemio.c`), against
+`afni -list_ports`, and against messages AFNI itself sent.
+
+- [x] **Ports:** `Ports` reproduces `init_ports_list`: `-np` offsets (1024–65500), `-npb` blocs (0–2686, `1024 + 24·bloc`), `AFNI_PORT_BLOC` / `AFNI_PORT_OFFSET` (`offset_from_env`; the bloc wins), the legacy fixed plugout ports when there is no offset, and the per-port variables `SUMA_AFNI_TCP_PORT`, `SUMA_AFNI_TCP_PORT2`, `SUMA_MATLAB_LISTEN_PORT`, `AFNI_PLUGOUT_TCP_BASE` (`PortEnv`). Every one of the 24 ports matches `afni -list_ports` in 11 environments (`tests/data/talk/ports_*.txt`)
+- [x] **Framing:** `encode` (binary NIML), `KEEP_READING` / `PAUSE_READING` (`<?name ?>\n`, as `NI_write_procins`), `registration_bytes` (procins + `SUMA_ixyz` + `SUMA_node_normals` + `SUMA_ijk` + procins), `drive_afni_element` (`ni_do`) and `drive_afni_procins` (`<?drive_afni cmd='…' ?>`), `switch_underlay_command`. `MessageReader` wraps `parse_stream` with a buffer cap; chunked at 1, 2, 7, 64 and 1000 bytes it gives the same elements as one shot
+- [x] **Builders:** `SurfaceInfo` / `Geometry` / `surface_elements` (attribute names as in `SUMA_niml.c`; validates normals and triangle indices, since AFNI would crash on bad ones), `Crosshair` (`SUMA_crosshair_xyz`, with `Do_icor` for InstaCorr), `Irgba` (`SUMA_irgba`)
+- [x] **Readers for what AFNI sends:** `CrosshairMessage` (the `SUMA_crosshair` group with `underlay_array` and `v2s_node_array`), `Irgba::from_element`
+- [x] **Checked against real messages:** AFNI's `SUMA_crosshair` group and a `SUMA_irgba` (from sumaru's recording) read correctly; the `SUMA_irgba` we write parses to the identical element and has the identical body bytes
+- [ ] **Not checked against a live AFNI.** The builders follow `SUMA_niml.c` and the recording, but nothing here has been sent to a running `afni -niml`
+
+Public API (new): `afni_io::talk` (feature `talk`). Coordinates are RAI; `talk::flip_xy` converts from RAS (GIfTI). Sockets, threads, message routing and DriveSuma command parsing stay in sumaru.
 
 ## Phase 10 — Beyond sumaru's current needs ⬜
 
@@ -196,6 +217,65 @@ Public API changes:
 
 Newest first. Record anything about AFNI, SUMA or sumaru behaviour that
 affects the design, with the phase it was found in.
+
+- **2026-10-03 · Phase 8.** SUMA joins the spec file's directory to a file name
+  with plain concatenation (`SUMA_Read_SpecFile`), so an absolute `SurfaceName`
+  in a spec becomes `dir//abs/name` and does not load. A bare spec name gives
+  `./`. This applies to `SurfaceName`, `CoordFile`, `TopoFile`,
+  `SureFitVolParam`, `MappingRef`, `LocalDomainParent`, `LocalCurvatureParent`,
+  `LabelDset` and `NodeMarker`, but not to `SurfaceVolume`, `SurfaceLabel`,
+  `OriginatorID` or `DomainGrandParentID`. `Spec::resolve` does the same;
+  `SpecSurface::resolve_path` (which uses `Path::join`) does not.
+- **2026-10-03 · Phase 8.** A new `NewSurface` inherits `SurfaceFormat`,
+  `SurfaceType`, `TopoFile`, `SureFitVolParam`, `MappingRef`, `Group`,
+  `SurfaceState` and `EmbedDimension` from the surface before it, and nothing
+  else (not `CoordFile`, `SurfaceName`, `SurfaceVolume`, `LocalDomainParent`).
+  A surface that does not restate `SurfaceState` keeps the previous state.
+  `MappingRef` is inherited too, so a following surface without its own parents
+  gets them from it. `LocalCurvatureParent` is the domain parent unless given;
+  when the domain parent is the surface's own file it becomes `SAME`, but the
+  curvature parent keeps the file name.
+- **2026-10-03 · Phase 8.** SUMA treats any spec line containing `#` as a
+  comment, so `Anatomical = N # note` loses the field. `inspec -detail`
+  prints a surface's file name only for the SureFit, 1D, FreeSurfer, Ply,
+  GenericInventor and OpenDX types, and nothing for GIFTI.
+- **2026-10-03 · Phase 8.** AFNI can read binary FreeSurfer surfaces
+  (`ConvertSurface -i_fs`) but has no writer for them, and no `.stc` reader.
+- **2026-10-03 · Phase 8.** The `.stc` layout in `src/stc.rs` (ms times, vertex
+  list, time-major `float32`) holds for a real MNE file. Three other `.stc`
+  files in the same study (a `baseline-stats` folder, about 32 KB each) have an
+  all-zero header and do not parse; they are not in this layout and were not
+  examined further.
+- **2026-10-03 · Phase 9.** **sumaru's port numbering differs from AFNI's in
+  three ways** (`afni_ports.c`, checked with `afni -list_ports`): (1) with no
+  offset, ports 9–21 (`AFNI_PLUGOUT_TCP_*` … `PLUGOUT_TTA_PORT`) are the
+  legacy 7955–7961 and 8099/8077/8009/8019/8001/8005, not `53211 + i`;
+  (2) `AFNI_NIML_FIRST_PORT` does **nothing**: `init_ports_list` sets `np` from
+  it and then overwrites `np` on the next lines. sumaru treats it as
+  `first - 1`; (3) AFNI rejects an offset above 65500 and a bloc above 2686
+  (printing an error and using the defaults), and an offset below 1024 is
+  skipped; sumaru's `resolve_afni_port_config` checks only `>= 1024`.
+  `AFNI_PORT_BLOC` beats `AFNI_PORT_OFFSET`, and a bad bloc does not fall
+  through to the offset.
+- **2026-10-03 · Phase 9.** With an offset, `SUMA_AFNI_TCP_PORT`,
+  `SUMA_AFNI_TCP_PORT2` and `SUMA_MATLAB_LISTEN_PORT` are ignored, but
+  `AFNI_PLUGOUT_TCP_BASE` is still applied.
+- **2026-10-03 · Phase 9.** AFNI reads `SUMA_crosshair_xyz` for its position
+  only (three floats; `Do_icor` also seeds InstaCorr). SUMA's own
+  `SUMA_crosshair_xyz` carries just `surface_nodeid`, `surface_idcode`,
+  `surface_label` and `current_overlay_dset_*`; sumaru's extra
+  `Parent_ID`, `local_domain_parent_ID` and `local_domain_parent` attributes
+  are not sent by SUMA and are not read by AFNI. AFNI's reply is a
+  `SUMA_crosshair` *group* of `SUMA_crosshair_xyz`, `underlay_array` (the
+  voxel's value in each underlay sub-brick, `vox_ijk`, `has_taxis`) and, on a
+  surface node, `v2s_node_array` (the underlay time series mapped to the node).
+  SUMA requires the xyz to be exactly three floats in one vector; an empty
+  `surface_nodeid` means none.
+- **2026-10-03 · Phase 9.** AFNI refuses a `SUMA_ijk` that arrives before its
+  `SUMA_ixyz`; registration order is ixyz, normals, ijk. A `SUMA_irgba` with no
+  nodes is how AFNI says "no overlay". AFNI also accepts a
+  `<?drive_afni cmd='…' ?>` processing instruction as well as the `ni_do`
+  element.
 
 - **2026-10-02 · Phase 6.** SUMA's `Collection` drawing type is **3**
   (`SUMA_define.h`), and SUMA writes the drawing type straight into `Type`

@@ -84,6 +84,47 @@ echo '0.984808 -0.173648 0 1  0.173648 0.984808 0 2  0 0 1 3' > _oblique.1D
 3drefit -atrfloat IJK_TO_DICOM_REAL _oblique.1D oblique+orig >/dev/null
 rm -f _oblique.1D
 
+# --- correlation: AFNI's 3-parameter form Correl(samples, nfit, nort) -------
+# afni-core must tell this apart from the NIfTI standard's 1-parameter form.
+# v = (i+j+k)/20 - 0.2, which lies inside (-1, 1).
+3dcalc -a "$grid,1" -expr '(i+j+k)/20-0.2' -datum float -prefix correl >/dev/null
+3drefit -substatpar 0 fico 30 2 1 correl+orig >/dev/null
+
+# --- FDR: AFNI's own FDR/MDF curves and 3dFDR z-scores for a null-plus-signal map
+# 20x20x20 = 8000 voxels, enough for AFNI's true-positive estimate (needs >= 233
+# voxels) and its missed-detection curve. #0 is a t(23) map, #1 an F(2,40) map;
+# p-values are uniform except in every 5th/6th voxel, where p is cubed (signal).
+# NOTE: jRandomDataset is random, so regenerating changes these data AND every
+# reference derived from them (curves, 3dFDR output, fdrval table) together.
+fdr_grid=jRandomDataset:20,20,20
+3dcalc -a "$fdr_grid,1" -b "$fdr_grid,1" \
+  -expr '(1-2*step(0.5-b))*fitt_p2t(0.00005+0.99990*a^(1+3*iszero(mod(i+j+k,5))),23)' \
+  -datum float -prefix _fdr_t >/dev/null
+3dcalc -a "$fdr_grid,1" \
+  -expr 'fift_p2t(0.00005+0.99990*a^(1+3*iszero(mod(i+2*j+k,6))),2,40)' \
+  -datum float -prefix _fdr_f >/dev/null
+3dbucket -prefix fdr _fdr_t+orig _fdr_f+orig >/dev/null
+3drefit -substatpar 0 fitt 23 -substatpar 1 fift 2 40 \
+        -sublabel 0 Tnull_sig -sublabel 1 Fnull_sig -addFDR fdr+orig >/dev/null
+rm -f _fdr_t+orig.* _fdr_f+orig.*
+3dFDR -input fdr+orig -prefix fdr_z >/dev/null 2>&1                # independent tests
+3dFDR -input fdr+orig -cdep -prefix fdr_zdep >/dev/null 2>&1       # arbitrary dependence
+# fdrval: q for a threshold, and the threshold for a q (-qinput), per sub-brick.
+# Format `fdrval <sub> <q|inverse> <value> => <output>` (fdrval prints 5 digits).
+{
+  for v in 0.5 1 1.5 2 2.5 3 3.5 4 5 8; do
+    echo "fdrval 0 q $v => $(fdrval fdr+orig 0 "$v" 2>/dev/null)"
+  done
+  for v in 0.3 1 2 3 5 8 13 30; do
+    echo "fdrval 1 q $v => $(fdrval fdr+orig 1 "$v" 2>/dev/null)"
+  done
+  for sub in 0 1; do
+    for q in 0.5 0.3 0.1 0.05 0.01 0.001 0.000001 0.000000000001; do
+      echo "fdrval $sub inverse $q => $(fdrval -qinput fdr+orig $sub "$q" 2>/dev/null)"
+    done
+  done
+} > fdr+orig.fdrval.txt
+
 # --- a label table (VALUE_LABEL_DTABLE), from the committed aparc table -----
 3dcopy u8+orig labelled >/dev/null
 3drefit -labeltable ../real/labels/aparc+aseg_REN_all.niml.lt labelled+orig >/dev/null
@@ -92,6 +133,15 @@ rm -f _oblique.1D
 3dAFNItoNIFTI -prefix stat.nii stat+orig >/dev/null 2>&1
 3dAFNItoNIFTI -pure -prefix stat_pure.nii stat+orig >/dev/null 2>&1
 3dAFNItoNIFTI -prefix s16.nii.gz s16+orig >/dev/null 2>&1
+# Correlation three ways: with the AFNI extension, pure (AFNI copies its own
+# parameters 30,2,1 into intent_p1..3), and a "standards-compliant" file whose
+# header holds the NIfTI one-parameter form: intent_p1 = dof 18, p2 = p3 = 0.
+# The last is made by patching bytes 56..67 of the pure file (intent_p1..3, float32).
+3dAFNItoNIFTI -prefix correl.nii correl+orig >/dev/null 2>&1
+3dAFNItoNIFTI -pure -prefix correl_pure.nii correl+orig >/dev/null 2>&1
+cp correl_pure.nii correl_standard.nii
+printf '\x00\x00\x90\x41\x00\x00\x00\x00\x00\x00\x00\x00' \
+  | dd of=correl_standard.nii bs=1 seek=56 conv=notrunc 2>/dev/null
 3dAFNItoNIFTI -prefix lpi.nii lpi+orig >/dev/null 2>&1
 3dAFNItoNIFTI -prefix oblique.nii oblique+orig >/dev/null 2>&1
 3dAFNItoNIFTI -prefix labelled.nii labelled+orig >/dev/null 2>&1
