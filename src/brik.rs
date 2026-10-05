@@ -42,12 +42,12 @@
 //! References: `afni/src/thd_initdblk.c`, `thd_loaddblk.c`, `thd_dsetto3D.c`,
 //! `mrilib.h` (`MRI_TYPE`), `README.attributes`, `matlab/BrikLoad.m`.
 
-use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::geometry::{Orientation, View};
+use crate::geometry::{Mat44, Orientation, TimeAxis, View};
 use crate::head::{AttributeValue, Header};
 
 /// AFNI sub-brick storage types (the `BRICK_TYPES` codes, which are the
@@ -278,7 +278,102 @@ pub struct SubBrick {
     pub factor: f32,
 }
 
+/// How true floating-point values should be stored in an AFNI sub-brick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StoragePolicy {
+    /// Store every value directly as an IEEE `float` with no scale factor.
+    Float,
+    /// Store signed shorts and choose a scale factor from the largest absolute
+    /// finite value, like `EDIT_substscale_brick(..., MRI_short, -1.0)`.
+    AutoShort,
+    /// Store signed shorts using this explicit `BRICK_FLOAT_FACS` value. The
+    /// factor must be finite and positive.
+    Short { factor: f32 },
+}
+
+/// A non-allocating iterator over the true, scaled scalar values in a sub-brick.
+#[derive(Debug, Clone)]
+pub struct ScaledValues<'a> {
+    sub_brick: &'a SubBrick,
+    index: usize,
+}
+
+impl Iterator for ScaledValues<'_> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.sub_brick.value(self.index)?;
+        self.index += 1;
+        Some(value)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.sub_brick.len().saturating_sub(self.index);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for ScaledValues<'_> {}
+
 impl SubBrick {
+    /// Build a scalar sub-brick from true floating-point values according to a
+    /// storage policy.
+    pub fn from_f32(values: Vec<f32>, storage: StoragePolicy) -> Result<Self> {
+        if values.is_empty() {
+            return Err(Error::invalid("a sub-brick cannot be empty"));
+        }
+        match storage {
+            StoragePolicy::Float => Ok(Self {
+                data: BrickData::Float(values),
+                factor: 0.0,
+            }),
+            StoragePolicy::AutoShort => {
+                let largest = values
+                    .iter()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .map(f32::abs)
+                    .fold(0.0_f32, f32::max);
+                if largest == 0.0 {
+                    return Ok(Self {
+                        data: BrickData::Short(vec![0; values.len()]),
+                        factor: 0.0,
+                    });
+                }
+                Self::from_f32(
+                    values,
+                    StoragePolicy::Short {
+                        factor: largest / i16::MAX as f32,
+                    },
+                )
+            }
+            StoragePolicy::Short { factor } => {
+                if !factor.is_finite() || factor <= 0.0 {
+                    return Err(Error::invalid(format!(
+                        "short scale factor must be finite and positive, got {factor}"
+                    )));
+                }
+                let data = values
+                    .into_iter()
+                    .map(|value| {
+                        if value.is_nan() {
+                            0
+                        } else {
+                            (value / factor)
+                                .round()
+                                .clamp(i16::MIN as f32, i16::MAX as f32)
+                                as i16
+                        }
+                    })
+                    .collect();
+                Ok(Self {
+                    data: BrickData::Short(data),
+                    factor,
+                })
+            }
+        }
+    }
+
     /// The datum type.
     pub fn brik_type(&self) -> BrikType {
         self.data.brik_type()
@@ -353,6 +448,37 @@ impl SubBrick {
             BrickData::Rgb(_) | BrickData::Rgba(_) => return None,
         })
     }
+
+    /// Iterate over scaled scalar values without allocating. RGB and RGBA
+    /// sub-bricks are rejected because they have no scalar interpretation in
+    /// `afni-io`.
+    pub fn scaled_values(&self) -> Result<ScaledValues<'_>> {
+        if matches!(self.data, BrickData::Rgb(_) | BrickData::Rgba(_)) {
+            return Err(Error::unsupported(
+                "RGB/RGBA sub-brick has no scalar values",
+            ));
+        }
+        Ok(ScaledValues {
+            sub_brick: self,
+            index: 0,
+        })
+    }
+
+    /// Copy scaled scalar values into a caller-owned buffer, allowing the same
+    /// allocation to be reused across sub-bricks.
+    pub fn copy_scaled_into(&self, output: &mut [f32]) -> Result<()> {
+        if output.len() != self.len() {
+            return Err(Error::invalid(format!(
+                "output buffer has {} values but sub-brick has {}",
+                output.len(),
+                self.len()
+            )));
+        }
+        for (dst, value) in output.iter_mut().zip(self.scaled_values()?) {
+            *dst = value;
+        }
+        Ok(())
+    }
 }
 
 /// The two files of an AFNI dataset, as resolved from any name AFNI accepts.
@@ -363,6 +489,27 @@ pub struct AfniPaths {
     /// The `.BRIK` or `.BRIK.gz` holding the voxels, or `None` when neither
     /// exists (a header-only dataset).
     pub brik: Option<PathBuf>,
+}
+
+/// Command-level policy for writing an AFNI HEAD/BRIK pair.
+///
+/// Writes are transactionally staged and flushed regardless of these options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrikWriteOptions {
+    /// Whether an existing target pair may be replaced.
+    pub overwrite: bool,
+    /// Optional command-history line appended to `HISTORY_NOTE` before writing.
+    pub history_entry: Option<String>,
+}
+
+impl Default for BrikWriteOptions {
+    fn default() -> Self {
+        Self {
+            // Preserve the historical behavior of `Brik::write`.
+            overwrite: true,
+            history_entry: None,
+        }
+    }
 }
 
 /// Suffixes that name an AFNI dataset file, longest first so that
@@ -459,6 +606,386 @@ pub struct Brik {
     /// One entry per sub-brick in the dataset. An entry is `None` when that
     /// sub-brick was not requested from [`Brik::read_sub_bricks`].
     pub sub_bricks: Vec<Option<SubBrick>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BrikFrameLayout {
+    brik_type: BrikType,
+    factor: f32,
+    offset: u64,
+    bytes: usize,
+}
+
+#[derive(Debug)]
+enum BrikReaderSource {
+    Plain(BufReader<File>),
+    Gzip(PathBuf),
+}
+
+/// On-demand reader for one AFNI sub-brick at a time.
+///
+/// An uncompressed BRIK remains open and frames are reached with an absolute
+/// seek. A gzipped BRIK is reopened and streamed only as far as the requested
+/// frame, so it remains memory-bounded but arbitrary reverse access is more
+/// expensive. Use [`Brik::read`] when every frame is needed at once.
+#[derive(Debug)]
+pub struct BrikReader {
+    header: Header,
+    dimensions: [usize; 3],
+    data_path: PathBuf,
+    little_endian: bool,
+    layout: Vec<BrikFrameLayout>,
+    source: BrikReaderSource,
+}
+
+impl BrikReader {
+    /// Open an AFNI dataset without loading any voxel values.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let paths = AfniPaths::resolve(path)?;
+        let header = Header::read(&paths.head)?;
+        let dimensions = header
+            .dimensions()
+            .ok_or_else(|| Error::missing("DATASET_DIMENSIONS"))?;
+        let voxels = dimensions
+            .iter()
+            .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
+            .ok_or_else(|| Error::invalid(format!("DATASET_DIMENSIONS {dimensions:?} overflow")))?;
+        let data_path = paths.brik.ok_or_else(|| {
+            Error::missing(format!(
+                "voxel data for {}: no .BRIK or .BRIK.gz next to it",
+                paths.head.display()
+            ))
+        })?;
+
+        let mut offset = 0u64;
+        let mut layout = Vec::with_capacity(header.nvals());
+        for frame in 0..header.nvals() {
+            let brik_type = BrikType::from_code(header.brick_type_code(frame))?;
+            let bytes = voxels
+                .checked_mul(brik_type.byte_width())
+                .ok_or_else(|| Error::invalid(format!("sub-brick {frame} size overflows")))?;
+            layout.push(BrikFrameLayout {
+                brik_type,
+                factor: header.brick_factor(frame) as f32,
+                offset,
+                bytes,
+            });
+            offset = offset
+                .checked_add(bytes as u64)
+                .ok_or_else(|| Error::invalid("dataset size overflows"))?;
+        }
+
+        let mut file = File::open(&data_path).map_err(|source| Error::Io {
+            path: data_path.clone(),
+            source,
+        })?;
+        let file_len = file
+            .metadata()
+            .map_err(|source| Error::Io {
+                path: data_path.clone(),
+                source,
+            })?
+            .len();
+        let mut magic = [0u8; 2];
+        let magic_len = file.read(&mut magic).map_err(|source| Error::Io {
+            path: data_path.clone(),
+            source,
+        })?;
+        file.seek(SeekFrom::Start(0)).map_err(|source| Error::Io {
+            path: data_path.clone(),
+            source,
+        })?;
+        let source = if crate::compress::is_gzip(&magic[..magic_len]) {
+            BrikReaderSource::Gzip(data_path.clone())
+        } else {
+            if file_len < offset {
+                return Err(Error::parse(format!(
+                    "{}: BRIK is {file_len} bytes but the header describes {offset}",
+                    data_path.display()
+                )));
+            }
+            BrikReaderSource::Plain(BufReader::new(file))
+        };
+
+        Ok(Self {
+            little_endian: header.brik_is_little_endian(),
+            header,
+            dimensions,
+            data_path,
+            layout,
+            source,
+        })
+    }
+
+    /// Parsed `.HEAD` attributes.
+    pub fn header(&self) -> &Header {
+        &self.header
+    }
+
+    /// Voxel dimensions `[nx, ny, nz]`.
+    pub fn dimensions(&self) -> [usize; 3] {
+        self.dimensions
+    }
+
+    /// Number of source sub-bricks.
+    pub fn nvals(&self) -> usize {
+        self.layout.len()
+    }
+
+    /// Number of voxels in each sub-brick.
+    pub fn voxels(&self) -> usize {
+        self.dimensions.iter().product()
+    }
+
+    /// Whether the voxel stream is gzip-compressed.
+    pub fn is_compressed(&self) -> bool {
+        matches!(self.source, BrikReaderSource::Gzip(_))
+    }
+
+    /// Load one source sub-brick while leaving all others on disk.
+    pub fn read_sub_brick(&mut self, frame: usize) -> Result<SubBrick> {
+        let layout = *self.layout.get(frame).ok_or_else(|| {
+            Error::invalid(format!(
+                "sub-brick {frame} is outside 0..{}",
+                self.layout.len().saturating_sub(1)
+            ))
+        })?;
+        let mut raw = vec![0u8; layout.bytes];
+        match &mut self.source {
+            BrikReaderSource::Plain(reader) => {
+                reader
+                    .seek(SeekFrom::Start(layout.offset))
+                    .map_err(|error| read_error(&self.data_path, frame, error))?;
+                reader
+                    .read_exact(&mut raw)
+                    .map_err(|error| read_error(&self.data_path, frame, error))?;
+            }
+            BrikReaderSource::Gzip(path) => {
+                let file = File::open(&*path).map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                let mut decoder = flate2::read::MultiGzDecoder::new(BufReader::new(file));
+                let skipped = io::copy(&mut decoder.by_ref().take(layout.offset), &mut io::sink())
+                    .map_err(|error| read_error(path, frame, error))?;
+                if skipped < layout.offset {
+                    return Err(truncated(path, frame, layout.offset, skipped));
+                }
+                decoder
+                    .read_exact(&mut raw)
+                    .map_err(|error| read_error(path, frame, error))?;
+            }
+        }
+        Ok(SubBrick {
+            data: BrickData::decode(layout.brik_type, &raw, self.little_endian),
+            factor: layout.factor,
+        })
+    }
+
+    /// Load one source sub-brick as true scaled values.
+    pub fn read_frame(&mut self, frame: usize) -> Result<Vec<f32>> {
+        self.read_sub_brick(frame)?.to_f32().ok_or_else(|| {
+            Error::unsupported(format!("sub-brick {frame} does not contain scalar data"))
+        })
+    }
+
+    /// Copy one scaled source sub-brick into a reusable caller-owned buffer.
+    pub fn read_frame_into(&mut self, frame: usize, output: &mut [f32]) -> Result<()> {
+        if output.len() != self.voxels() {
+            return Err(Error::invalid(format!(
+                "frame buffer has {} values but dataset has {} voxels",
+                output.len(),
+                self.voxels()
+            )));
+        }
+        self.read_sub_brick(frame)?.copy_scaled_into(output)
+    }
+}
+
+/// Builder for an AFNI volume dataset with validated geometry and metadata.
+#[derive(Debug, Clone)]
+pub struct BrikBuilder {
+    dimensions: [usize; 3],
+    orientation: [Orientation; 3],
+    origin: [f64; 3],
+    delta: [f64; 3],
+    real_affine: Option<Mat44>,
+    sub_bricks: Vec<SubBrick>,
+    labels: Option<Vec<String>>,
+    time_axis: Option<TimeAxis>,
+    history: Option<String>,
+}
+
+impl BrikBuilder {
+    /// Start a dataset on a cardinal grid.
+    pub fn cardinal(
+        dimensions: [usize; 3],
+        orientation: [Orientation; 3],
+        origin: [f64; 3],
+        delta: [f64; 3],
+    ) -> Self {
+        Self {
+            dimensions,
+            orientation,
+            origin,
+            delta,
+            real_affine: None,
+            sub_bricks: Vec::new(),
+            labels: None,
+            time_axis: None,
+            history: None,
+        }
+    }
+
+    /// Start a dataset from a possibly oblique voxel-to-DICOM/RAI affine.
+    /// The closest cardinal orientation is derived for AFNI's display grid;
+    /// the exact matrix is retained as `IJK_TO_DICOM_REAL`.
+    pub fn affine(dimensions: [usize; 3], affine: Mat44) -> Result<Self> {
+        let (orientation, origin, delta) = cardinal_parts(&affine)?;
+        Ok(Self {
+            dimensions,
+            orientation,
+            origin,
+            delta,
+            real_affine: Some(affine),
+            sub_bricks: Vec::new(),
+            labels: None,
+            time_axis: None,
+            history: None,
+        })
+    }
+
+    /// Start an empty output on the exact grid of an existing AFNI dataset,
+    /// including its real oblique affine. Sub-bricks and per-brick metadata are
+    /// deliberately not copied.
+    pub fn like_grid(source: &Brik) -> Result<Self> {
+        Self::affine(source.dimensions, source.header.ijk_to_dicom()?)
+    }
+
+    /// Append one output sub-brick.
+    pub fn sub_brick(mut self, sub_brick: SubBrick) -> Self {
+        self.sub_bricks.push(sub_brick);
+        self
+    }
+
+    /// Append true `f32` values using a storage policy.
+    pub fn values(mut self, values: Vec<f32>, storage: StoragePolicy) -> Result<Self> {
+        self.sub_bricks.push(SubBrick::from_f32(values, storage)?);
+        Ok(self)
+    }
+
+    /// Set one label per output sub-brick.
+    pub fn labels<S: Into<String>>(mut self, labels: impl IntoIterator<Item = S>) -> Self {
+        self.labels = Some(labels.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Attach a time axis.
+    pub fn time_axis(mut self, axis: TimeAxis) -> Self {
+        self.time_axis = Some(axis);
+        self
+    }
+
+    /// Set `HISTORY_NOTE`.
+    pub fn history(mut self, history: impl Into<String>) -> Self {
+        self.history = Some(history.into());
+        self
+    }
+
+    /// Validate and construct the dataset.
+    pub fn build(self) -> Result<Brik> {
+        let mut brik = Brik::new(
+            self.dimensions,
+            self.orientation,
+            self.origin,
+            self.delta,
+            self.sub_bricks,
+        )?;
+        if let Some(affine) = self.real_affine {
+            let flat: Vec<f64> = affine[..3].iter().flatten().copied().collect();
+            brik.header
+                .set("IJK_TO_DICOM_REAL", AttributeValue::Float(flat));
+        }
+        if let Some(labels) = self.labels {
+            brik.set_brick_labels(&labels)?;
+        }
+        if let Some(axis) = self.time_axis {
+            if axis.nt != brik.nvals() {
+                return Err(Error::invalid(format!(
+                    "time axis has {} points but dataset has {} sub-bricks",
+                    axis.nt,
+                    brik.nvals()
+                )));
+            }
+            brik.header.set_time_axis(&axis)?;
+        }
+        if let Some(history) = self.history {
+            brik.header.set_history(history);
+        }
+        Ok(brik)
+    }
+}
+
+/// Derive AFNI's cardinal orientation/origin/delta attributes from a real
+/// voxel-to-DICOM affine. Each voxel axis must have a distinct dominant world
+/// axis; shears and rotations remain in the real affine.
+fn cardinal_parts(affine: &Mat44) -> Result<([Orientation; 3], [f64; 3], [f64; 3])> {
+    if affine.iter().flatten().any(|v| !v.is_finite()) || affine[3] != [0.0, 0.0, 0.0, 1.0] {
+        return Err(Error::invalid(
+            "affine must be finite with last row [0,0,0,1]",
+        ));
+    }
+    let determinant = affine[0][0] * (affine[1][1] * affine[2][2] - affine[1][2] * affine[2][1])
+        - affine[0][1] * (affine[1][0] * affine[2][2] - affine[1][2] * affine[2][0])
+        + affine[0][2] * (affine[1][0] * affine[2][1] - affine[1][1] * affine[2][0]);
+    if determinant.abs() <= f64::EPSILON {
+        return Err(Error::invalid("affine spatial transform is singular"));
+    }
+
+    // Choose the axis permutation with the largest total alignment. Selecting
+    // each column's largest component independently can assign the same world
+    // axis twice for a valid, strongly oblique matrix.
+    const PERMUTATIONS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let rows = PERMUTATIONS
+        .into_iter()
+        .max_by(|a, b| {
+            let score =
+                |p: &[usize; 3]| (0..3).map(|axis| affine[p[axis]][axis].abs()).sum::<f64>();
+            score(a).total_cmp(&score(b))
+        })
+        .expect("six axis permutations");
+    let mut orientation = [Orientation::R2L; 3];
+    let mut origin = [0.0; 3];
+    let mut delta = [0.0; 3];
+    for axis in 0..3 {
+        let row = rows[axis];
+        let component = affine[row][axis];
+        if component == 0.0 {
+            return Err(Error::invalid(
+                "affine does not have three distinct spatial axes",
+            ));
+        }
+        orientation[axis] = match (row, component.is_sign_positive()) {
+            (0, true) => Orientation::R2L,
+            (0, false) => Orientation::L2R,
+            (1, true) => Orientation::A2P,
+            (1, false) => Orientation::P2A,
+            (2, true) => Orientation::I2S,
+            (2, false) => Orientation::S2I,
+            _ => unreachable!(),
+        };
+        origin[axis] = affine[row][3];
+        delta[axis] = component.signum()
+            * (affine[0][axis].powi(2) + affine[1][axis].powi(2) + affine[2][axis].powi(2)).sqrt();
+    }
+    Ok((orientation, origin, delta))
 }
 
 impl Brik {
@@ -636,10 +1163,25 @@ impl Brik {
     /// Other attributes (labels, statistics, geometry, history) are written
     /// as they are, so keep them consistent if you change the sub-bricks.
     ///
+    /// Both files are staged and flushed in the destination directory before
+    /// publication. The BRIK is published first and the HEAD last, so a new
+    /// dataset does not become discoverable until its voxel file is ready. If
+    /// replacement of an existing pair fails, the old pair is restored.
     /// Existing files are overwritten. To avoid leaving a stale copy that
-    /// [`AfniPaths::resolve`] would pick up, it is an error if the other
-    /// form of the BRIK (`.BRIK` vs `.BRIK.gz`) already exists.
+    /// [`AfniPaths::resolve`] would pick up, it is an error if the other form
+    /// of the BRIK (`.BRIK` vs `.BRIK.gz`) already exists.
     pub fn write(&self, path: impl AsRef<Path>) -> Result<AfniPaths> {
+        self.write_with_options(path, &BrikWriteOptions::default())
+    }
+
+    /// Write with explicit overwrite and history policy. Both files are staged
+    /// and flushed before the transactional publication described by
+    /// [`Brik::write`].
+    pub fn write_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: &BrikWriteOptions,
+    ) -> Result<AfniPaths> {
         self.check_complete()?;
         let path = path.as_ref();
         let text = path
@@ -662,6 +1204,14 @@ impl Brik {
         let head = PathBuf::from(format!("{base}.HEAD"));
         let brik = PathBuf::from(format!("{base}.BRIK{}", if gzip { ".gz" } else { "" }));
         let other = PathBuf::from(format!("{base}.BRIK{}", if gzip { "" } else { ".gz" }));
+        if !options.overwrite {
+            if let Some(existing) = [&head, &brik].into_iter().find(|path| path.exists()) {
+                return Err(Error::invalid(format!(
+                    "{} exists; enable overwrite to replace it",
+                    existing.display()
+                )));
+            }
+        }
         if other.exists() {
             return Err(Error::invalid(format!(
                 "{} exists; remove it before writing {}",
@@ -669,8 +1219,19 @@ impl Brik {
                 brik.display()
             )));
         }
+        for target in [&head, &brik] {
+            if target.exists() && !target.is_file() {
+                return Err(Error::invalid(format!(
+                    "{} exists but is not a file",
+                    target.display()
+                )));
+            }
+        }
 
-        let header = self.header_for_writing(view);
+        let mut header = self.header_for_writing(view);
+        if let Some(entry) = &options.history_entry {
+            header.append_history(entry);
+        }
         let mut bytes = Vec::new();
         for sub in self.sub_bricks.iter().flatten() {
             bytes.extend_from_slice(&sub.data.to_le_bytes());
@@ -678,8 +1239,12 @@ impl Brik {
         if gzip {
             bytes = crate::compress::gzip(&bytes);
         }
-        crate::error::write_file(&brik, &bytes)?;
-        header.write(&head)?;
+        let mut staged = StagedFiles::default();
+        let staged_brik = stage_file(&brik, &bytes, "brik")?;
+        staged.track(staged_brik.clone());
+        let staged_head = stage_file(&head, header.to_head_string().as_bytes(), "head")?;
+        staged.track(staged_head.clone());
+        commit_staged_pair(&staged_head, &staged_brik, &head, &brik, options.overwrite)?;
         Ok(AfniPaths {
             head,
             brik: Some(brik),
@@ -789,6 +1354,303 @@ impl Brik {
     /// sub-brick, or for RGB/RGBA.
     pub fn value(&self, i: usize, j: usize, k: usize, p: usize) -> Option<f32> {
         self.sub_brick(p)?.value(self.voxel_index(i, j, k)?)
+    }
+
+    /// Replace one sub-brick after validating its voxel count.
+    pub fn replace_sub_brick(&mut self, p: usize, sub_brick: SubBrick) -> Result<Option<SubBrick>> {
+        if sub_brick.len() != self.voxels() {
+            return Err(Error::invalid(format!(
+                "replacement sub-brick has {} voxels but grid has {}",
+                sub_brick.len(),
+                self.voxels()
+            )));
+        }
+        let slot = self
+            .sub_bricks
+            .get_mut(p)
+            .ok_or_else(|| Error::invalid(format!("sub-brick {p} is out of range")))?;
+        Ok(slot.replace(sub_brick))
+    }
+
+    /// Append a sub-brick after validating its voxel count, returning its index.
+    pub fn push_sub_brick(&mut self, sub_brick: SubBrick) -> Result<usize> {
+        if sub_brick.len() != self.voxels() {
+            return Err(Error::invalid(format!(
+                "new sub-brick has {} voxels but grid has {}",
+                sub_brick.len(),
+                self.voxels()
+            )));
+        }
+        let index = self.sub_bricks.len();
+        self.sub_bricks.push(Some(sub_brick));
+        self.header.set(
+            "DATASET_RANK",
+            AttributeValue::Int(vec![3, self.sub_bricks.len() as i64]),
+        );
+        // Appending a frame extends an existing time series. Keeping the old
+        // TAXIS_NUMS[0] would leave the header internally inconsistent.
+        if let Some(mut axis) = self.header.time_axis() {
+            axis.nt = self.sub_bricks.len();
+            self.header.set_time_axis(&axis)?;
+        }
+        Ok(index)
+    }
+
+    /// Set one label per sub-brick.
+    pub fn set_brick_labels<S: AsRef<str>>(&mut self, labels: &[S]) -> Result<()> {
+        if labels.len() != self.nvals() {
+            return Err(Error::invalid(format!(
+                "got {} labels for {} sub-bricks",
+                labels.len(),
+                self.nvals()
+            )));
+        }
+        self.header.set_brick_labels(labels)
+    }
+
+    /// Copy the scaled time series at flat voxel `index` into `output`.
+    pub fn voxel_series_into(&self, index: usize, output: &mut [f32]) -> Result<()> {
+        if index >= self.voxels() {
+            return Err(Error::invalid(format!(
+                "voxel index {index} is out of range for {} voxels",
+                self.voxels()
+            )));
+        }
+        if output.len() != self.nvals() {
+            return Err(Error::invalid(format!(
+                "time-series buffer has {} values but dataset has {} sub-bricks",
+                output.len(),
+                self.nvals()
+            )));
+        }
+        for (p, value) in output.iter_mut().enumerate() {
+            *value = self
+                .sub_brick(p)
+                .ok_or_else(|| Error::invalid(format!("sub-brick {p} was not loaded")))?
+                .value(index)
+                .ok_or_else(|| Error::unsupported(format!("sub-brick {p} is not scalar")))?;
+        }
+        Ok(())
+    }
+
+    /// The scaled time series at flat voxel `index`.
+    pub fn voxel_series(&self, index: usize) -> Result<Vec<f32>> {
+        let mut values = vec![0.0; self.nvals()];
+        self.voxel_series_into(index, &mut values)?;
+        Ok(values)
+    }
+}
+
+/// Staging paths are removed on every early return. Once renamed or linked
+/// into place they no longer exist, so successful commits need no disarm step.
+#[derive(Debug, Default)]
+struct StagedFiles {
+    paths: Vec<PathBuf>,
+}
+
+impl StagedFiles {
+    fn track(&mut self, path: PathBuf) {
+        self.paths.push(path);
+    }
+}
+
+impl Drop for StagedFiles {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn stage_file(target: &Path, bytes: &[u8], role: &str) -> Result<PathBuf> {
+    for _ in 0..100 {
+        let path = auxiliary_path(target, role, "tmp");
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(Error::Io {
+                    path: path.clone(),
+                    source,
+                })
+            }
+        };
+        let result = file.write_all(bytes).and_then(|()| file.sync_all());
+        if let Err(source) = result {
+            drop(file);
+            let _ = fs::remove_file(&path);
+            return Err(Error::Io {
+                path: path.clone(),
+                source,
+            });
+        }
+        return Ok(path);
+    }
+    Err(Error::invalid(format!(
+        "could not create a unique staging file next to {}",
+        target.display()
+    )))
+}
+
+fn auxiliary_path(target: &Path, role: &str, suffix: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "dataset".into());
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(
+        ".{name}.afni-io-{role}-{}-{sequence}.{suffix}",
+        std::process::id()
+    ))
+}
+
+fn commit_staged_pair(
+    staged_head: &Path,
+    staged_brik: &Path,
+    target_head: &Path,
+    target_brik: &Path,
+    overwrite: bool,
+) -> Result<()> {
+    for target in [target_head, target_brik] {
+        if target.exists() && !target.is_file() {
+            return Err(Error::invalid(format!(
+                "{} exists but is not a file",
+                target.display()
+            )));
+        }
+    }
+    if !overwrite {
+        // A hard link publishes the already-flushed inode and, unlike rename
+        // on Unix, atomically refuses to replace a name created by a racer.
+        fs::hard_link(staged_brik, target_brik).map_err(|source| Error::Io {
+            path: target_brik.to_path_buf(),
+            source,
+        })?;
+        if let Err(source) = fs::hard_link(staged_head, target_head) {
+            let rollback = fs::remove_file(target_brik);
+            return Err(commit_error(target_head, source, rollback.err()));
+        }
+        let _ = fs::remove_file(staged_brik);
+        let _ = fs::remove_file(staged_head);
+        return Ok(());
+    }
+
+    let head_backup = target_head
+        .exists()
+        .then(|| unused_auxiliary_path(target_head, "head-backup", "bak"));
+    let brik_backup = target_brik
+        .exists()
+        .then(|| unused_auxiliary_path(target_brik, "brik-backup", "bak"));
+    let mut head_saved = false;
+    let mut brik_saved = false;
+    let mut head_installed = false;
+    let mut brik_installed = false;
+
+    let commit = (|| -> io::Result<()> {
+        // Remove the HEAD first, making an old dataset temporarily
+        // undiscoverable rather than exposing a mismatched pair.
+        if let Some(backup) = &head_backup {
+            fs::rename(target_head, backup)?;
+            head_saved = true;
+        }
+        if let Some(backup) = &brik_backup {
+            fs::rename(target_brik, backup)?;
+            brik_saved = true;
+        }
+        fs::rename(staged_brik, target_brik)?;
+        brik_installed = true;
+        fs::rename(staged_head, target_head)?;
+        head_installed = true;
+        Ok(())
+    })();
+
+    if let Err(source) = commit {
+        let rollback = rollback_pair(
+            target_head,
+            target_brik,
+            head_backup.as_deref(),
+            brik_backup.as_deref(),
+            head_saved,
+            brik_saved,
+            head_installed,
+            brik_installed,
+        );
+        return Err(commit_error(target_head, source, rollback.err()));
+    }
+
+    if let Some(backup) = head_backup {
+        let _ = fs::remove_file(backup);
+    }
+    if let Some(backup) = brik_backup {
+        let _ = fs::remove_file(backup);
+    }
+    Ok(())
+}
+
+fn unused_auxiliary_path(target: &Path, role: &str, suffix: &str) -> PathBuf {
+    loop {
+        let path = auxiliary_path(target, role, suffix);
+        if !path.exists() {
+            return path;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rollback_pair(
+    target_head: &Path,
+    target_brik: &Path,
+    head_backup: Option<&Path>,
+    brik_backup: Option<&Path>,
+    head_saved: bool,
+    brik_saved: bool,
+    head_installed: bool,
+    brik_installed: bool,
+) -> io::Result<()> {
+    let mut first_error = None;
+    if head_installed {
+        if let Err(error) = fs::remove_file(target_head) {
+            first_error.get_or_insert(error);
+        }
+    }
+    if brik_installed {
+        if let Err(error) = fs::remove_file(target_brik) {
+            first_error.get_or_insert(error);
+        }
+    }
+    if brik_saved {
+        if let Some(backup) = brik_backup {
+            if let Err(error) = fs::rename(backup, target_brik) {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if head_saved {
+        if let Some(backup) = head_backup {
+            if let Err(error) = fs::rename(backup, target_head) {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn commit_error(path: &Path, source: io::Error, rollback: Option<io::Error>) -> Error {
+    match rollback {
+        Some(rollback) => Error::invalid(format!(
+            "publishing {} failed ({source}); rollback also failed ({rollback})",
+            path.display()
+        )),
+        None => Error::Io {
+            path: path.to_path_buf(),
+            source,
+        },
     }
 }
 
@@ -1192,5 +2054,84 @@ mod tests {
         assert!(err.contains("sub-brick 2"), "{err}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn transactional_overwrite_restores_the_old_pair_on_commit_failure() {
+        let dir = scratch("transaction_rollback");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let head = dir.join("result+orig.HEAD");
+        let brik = dir.join("result+orig.BRIK");
+        std::fs::write(&head, b"old head").unwrap();
+        std::fs::write(&brik, b"old brik").unwrap();
+
+        let staged_brik = stage_file(&brik, b"new brik", "test-brik").unwrap();
+        let missing_head = dir.join("missing-head-stage");
+        assert!(commit_staged_pair(&missing_head, &staged_brik, &head, &brik, true).is_err());
+        assert_eq!(std::fs::read(&head).unwrap(), b"old head");
+        assert_eq!(std::fs::read(&brik).unwrap(), b"old brik");
+        assert!(!staged_brik.exists());
+        assert!(std::fs::read_dir(&dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".afni-io-")
+        }));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transactional_no_clobber_removes_a_partially_published_new_pair() {
+        let dir = scratch("transaction_no_clobber");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let head = dir.join("result+orig.HEAD");
+        let brik = dir.join("result+orig.BRIK");
+        std::fs::write(&head, b"someone else's head").unwrap();
+        let staged_head = stage_file(&head, b"new head", "test-head").unwrap();
+        let staged_brik = stage_file(&brik, b"new brik", "test-brik").unwrap();
+
+        assert!(commit_staged_pair(&staged_head, &staged_brik, &head, &brik, false).is_err());
+        assert_eq!(std::fs::read(&head).unwrap(), b"someone else's head");
+        assert!(!brik.exists());
+        // The caller's staging guard owns cleanup on failure. These direct
+        // helper inputs remain available and are removed here.
+        std::fs::remove_file(staged_head).unwrap();
+        std::fs::remove_file(staged_brik).unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transactional_write_replaces_a_pair_without_auxiliary_files() {
+        let dir = scratch("transaction_success");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stem = dir.join("result+orig");
+        std::fs::write(format!("{}.HEAD", stem.display()), b"old head").unwrap();
+        std::fs::write(format!("{}.BRIK", stem.display()), b"old brik").unwrap();
+        let dataset = Brik::new(
+            [1, 1, 1],
+            [Orientation::R2L, Orientation::A2P, Orientation::I2S],
+            [0.0; 3],
+            [1.0; 3],
+            vec![SubBrick {
+                data: BrickData::Float(vec![42.0]),
+                factor: 0.0,
+            }],
+        )
+        .unwrap();
+
+        dataset.write(&stem).unwrap();
+        assert_eq!(Brik::read(&stem).unwrap().value(0, 0, 0, 0), Some(42.0));
+        assert!(std::fs::read_dir(&dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".afni-io-")
+        }));
+        std::fs::remove_dir_all(dir).ok();
     }
 }

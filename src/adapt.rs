@@ -42,6 +42,7 @@
 //! Adapters from file types to [`afni_core::dataset::Dataset`].
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use afni_core::column::{ColumnData, ColumnRange, ColumnRole, DataColumn, RecordedRange};
 use afni_core::curve::ThresholdCurve as CoreCurve;
@@ -50,22 +51,25 @@ use afni_core::domain::{Domain, DomainId, SurfaceDomain, VolumeDomain};
 use afni_core::labels::{LabelEntry as CoreEntry, LabelTable as CoreTable};
 use afni_core::mapping::SampleMap;
 use afni_core::roi::{Roi as CoreRoi, RoiStroke as CoreStroke};
-use afni_core::stat::IntentOrigin;
+use afni_core::stat::{IntentOrigin, StatSpec};
 
-use crate::array::TypedArray;
+use crate::array::{DataType, TypedArray};
+use crate::brik::{AfniPaths, Brik, BrikBuilder, BrikWriteOptions, StoragePolicy};
 use crate::dset::NimlDataset;
 use crate::error::{Error, Result};
+use crate::geometry::{dicom_to_ras, TimeAxis, TimeUnits};
 use crate::gifti::{self, Gifti};
 use crate::graph::{GraphBucket, MatrixShape, NodeRow};
 use crate::head::{AttributeValue, Header};
 use crate::labels::{LabelEntry, LabelTable};
+use crate::nifti::{Nifti, NiftiHeader, NiftiVersion, NiftiWriteOptions};
 use crate::niml::{NimlElement, NumericMatrix};
 use crate::onedee::OneD;
 use crate::roi::{NodeRoi, RoiDatum};
 use crate::stat::ThresholdCurve;
 use crate::surface::Surface;
 use crate::tract::{RawBundle, RawTract, TractNetwork};
-use crate::volume::Volume;
+use crate::volume::{GridSpec, Volume};
 
 /// Convert a core error into this crate's error type.
 fn core_err(e: afni_core::Error) -> Error {
@@ -690,6 +694,597 @@ pub fn gifti_to_core_with(
 // ---------------------------------------------------------------------------
 // Volumes
 // ---------------------------------------------------------------------------
+
+/// A file-neutral volume dataset together with an optional source AFNI header.
+///
+/// The header preserves history and private attributes while the core dataset
+/// is processed. [`VolumeEnvelope::to_brik`] and [`VolumeEnvelope::to_nifti`]
+/// regenerate structural and per-frame attributes so stale storage metadata
+/// is not copied.
+#[derive(Debug, Clone)]
+pub struct VolumeEnvelope {
+    /// File-neutral values and semantic metadata.
+    pub dataset: Dataset,
+    /// Original AFNI attributes, when the source had them.
+    pub source_header: Option<Header>,
+}
+
+/// Disk format selected by the format-neutral volume writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeOutputFormat {
+    /// AFNI `.HEAD` plus `.BRIK` or `.BRIK.gz`.
+    Afni,
+    /// Single-file NIfTI `.nii` or `.nii.gz`.
+    Nifti,
+}
+
+impl VolumeOutputFormat {
+    fn from_path(path: &Path) -> Result<Self> {
+        let text = path
+            .to_str()
+            .ok_or_else(|| Error::invalid("non-UTF-8 volume output path"))?;
+        if text.ends_with(".nii") || text.ends_with(".nii.gz") {
+            return Ok(Self::Nifti);
+        }
+        if text.ends_with(".hdr") || text.ends_with(".img") {
+            return Err(Error::unsupported(
+                "detached NIfTI output (.hdr/.img) is not supported; use .nii or .nii.gz",
+            ));
+        }
+        if AfniPaths::is_afni_name(path) || path.extension().is_none() {
+            return Ok(Self::Afni);
+        }
+        Err(Error::invalid(format!(
+            "cannot infer volume output format from {}; use .nii/.nii.gz, an AFNI +view name, or set VolumeWriteOptions::format",
+            path.display()
+        )))
+    }
+}
+
+/// Policy shared by AFNI and NIfTI output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VolumeWriteOptions {
+    /// Explicit format, or `None` to infer it from the destination name.
+    pub format: Option<VolumeOutputFormat>,
+    /// Whether existing output files may be replaced.
+    pub overwrite: bool,
+    /// Optional command line appended to the AFNI `HISTORY_NOTE`. NIfTI output
+    /// carries the same history in its AFNI header extension.
+    pub history_entry: Option<String>,
+    /// Storage policy for AFNI BRIKs. NIfTI output is always unscaled `f32`.
+    pub afni_storage: StoragePolicy,
+    /// Header version for NIfTI output.
+    pub nifti_version: NiftiVersion,
+}
+
+impl Default for VolumeWriteOptions {
+    fn default() -> Self {
+        Self {
+            format: None,
+            overwrite: true,
+            history_entry: None,
+            afni_storage: StoragePolicy::Float,
+            nifti_version: NiftiVersion::Nifti1,
+        }
+    }
+}
+
+/// Files produced by a format-neutral volume write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WrittenVolume {
+    /// The two AFNI dataset paths.
+    Afni(AfniPaths),
+    /// The single NIfTI file.
+    Nifti(PathBuf),
+}
+
+impl WrittenVolume {
+    /// Format that was written.
+    pub fn format(&self) -> VolumeOutputFormat {
+        match self {
+            Self::Afni(_) => VolumeOutputFormat::Afni,
+            Self::Nifti(_) => VolumeOutputFormat::Nifti,
+        }
+    }
+}
+
+/// Builder for a new file-neutral volume dataset.
+///
+/// Geometry is supplied in the common voxel-to-RAS convention. Frames are
+/// true `f32` values; AFNI storage scaling is chosen only when the finished
+/// envelope is written. This lets a command construct its result before it
+/// knows whether the user requested HEAD/BRIK or NIfTI output.
+#[derive(Debug, Clone)]
+pub struct VolumeBuilder {
+    grid: GridSpec,
+    frames: Vec<Vec<f32>>,
+    labels: Option<Vec<String>>,
+    stats: Option<Vec<Option<StatSpec>>>,
+    time_step_seconds: Option<f64>,
+    time_start_seconds: Option<f64>,
+    history: Option<String>,
+    source_header: Option<Header>,
+}
+
+impl VolumeBuilder {
+    /// Start an empty output on a validated RAS grid.
+    pub fn new(grid: GridSpec) -> Result<Self> {
+        VolumeDomain::new(None, grid.dimensions, Some(grid.ijk_to_ras)).map_err(core_err)?;
+        Ok(Self {
+            grid,
+            frames: Vec::new(),
+            labels: None,
+            stats: None,
+            time_step_seconds: None,
+            time_start_seconds: None,
+            history: None,
+            source_header: None,
+        })
+    }
+
+    /// Start an empty output on a loaded volume's exact grid, retaining its
+    /// AFNI/private attributes for a later format-neutral round trip. Values
+    /// and per-frame metadata are deliberately not copied.
+    pub fn like(source: &Volume) -> Result<Self> {
+        let mut builder = Self::new(source.grid()?)?;
+        builder.source_header = source.afni_header()?;
+        Ok(builder)
+    }
+
+    /// Append one frame of true values in i-fastest voxel order.
+    pub fn values(mut self, values: Vec<f32>) -> Result<Self> {
+        if values.len() != self.grid.voxels() {
+            return Err(Error::invalid(format!(
+                "frame has {} voxels but grid has {}",
+                values.len(),
+                self.grid.voxels()
+            )));
+        }
+        self.frames.push(values);
+        Ok(self)
+    }
+
+    /// Set one label per frame. The count is checked by [`Self::build`].
+    pub fn labels<S: Into<String>>(mut self, labels: impl IntoIterator<Item = S>) -> Self {
+        self.labels = Some(labels.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Set one optional statistic per frame. The count is checked by
+    /// [`Self::build`].
+    pub fn stats(mut self, stats: impl IntoIterator<Item = Option<StatSpec>>) -> Self {
+        self.stats = Some(stats.into_iter().collect());
+        self
+    }
+
+    /// Mark frames as a regularly sampled time series, in seconds.
+    pub fn time_axis_seconds(mut self, step: f64, start: f64) -> Self {
+        self.time_step_seconds = Some(step);
+        self.time_start_seconds = Some(start);
+        self
+    }
+
+    /// Set the complete `HISTORY_NOTE`. A command line supplied to
+    /// [`VolumeWriteOptions`] is appended when the result is written.
+    pub fn history(mut self, history: impl Into<String>) -> Self {
+        self.history = Some(history.into());
+        self
+    }
+
+    /// Retain a template AFNI header's private attributes. Structural and
+    /// per-frame fields are regenerated from this builder when written.
+    pub fn source_header(mut self, header: Header) -> Self {
+        self.source_header = Some(header);
+        self
+    }
+
+    /// Validate the frames and metadata and build a file-neutral envelope.
+    pub fn build(self) -> Result<VolumeEnvelope> {
+        if self.frames.is_empty() {
+            return Err(Error::invalid("a volume output needs at least one frame"));
+        }
+        let frame_count = self.frames.len();
+        let labels = match self.labels {
+            Some(labels) if labels.len() != frame_count => {
+                return Err(Error::invalid(format!(
+                    "got {} labels for {frame_count} frames",
+                    labels.len()
+                )))
+            }
+            Some(labels) => labels,
+            None => (0..frame_count).map(|frame| format!("#{frame}")).collect(),
+        };
+        if labels
+            .iter()
+            .any(|label| label.contains('\0') || label.contains('~'))
+        {
+            return Err(Error::invalid("volume labels cannot contain NUL or '~'"));
+        }
+        let stats = match self.stats {
+            Some(stats) if stats.len() != frame_count => {
+                return Err(Error::invalid(format!(
+                    "got {} statistics for {frame_count} frames",
+                    stats.len()
+                )))
+            }
+            Some(stats) => stats,
+            None => vec![None; frame_count],
+        };
+        let is_time_series = self.time_step_seconds.is_some();
+        let columns = self
+            .frames
+            .into_iter()
+            .zip(labels)
+            .zip(stats)
+            .map(|((values, label), stat)| {
+                let role = if stat.is_some() {
+                    ColumnRole::Statistic
+                } else if is_time_series {
+                    ColumnRole::TimePoint
+                } else {
+                    ColumnRole::Generic
+                };
+                DataColumn::new(label, role, ColumnData::Float32(values))
+                    .map_err(core_err)
+                    .map(|column| column.with_stat(stat))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let id = self
+            .source_header
+            .as_ref()
+            .and_then(|header| domain_id(header.idcode()));
+        let domain = Domain::Volume(
+            VolumeDomain::new(id, self.grid.dimensions, Some(self.grid.ijk_to_ras))
+                .map_err(core_err)?,
+        );
+        let kind = if is_time_series {
+            DatasetKind::TimeSeries
+        } else {
+            DatasetKind::Scalar
+        };
+        let mut dataset = Dataset::dense(kind, domain, columns).map_err(core_err)?;
+        dataset = dataset
+            .with_time_step_seconds(self.time_step_seconds)
+            .map_err(core_err)?;
+        dataset = dataset
+            .with_time_start_seconds(self.time_start_seconds)
+            .map_err(core_err)?;
+
+        let mut source_header = self.source_header;
+        if let Some(history) = self.history {
+            source_header
+                .get_or_insert_with(Header::default)
+                .set_history(history);
+        }
+        Ok(VolumeEnvelope {
+            dataset,
+            source_header,
+        })
+    }
+}
+
+impl VolumeEnvelope {
+    /// Wrap a core dataset that did not come from a file.
+    pub fn from_core(dataset: Dataset) -> Self {
+        Self {
+            dataset,
+            source_header: None,
+        }
+    }
+
+    /// Convert the core volume back into an AFNI HEAD/BRIK dataset.
+    pub fn to_brik(&self, storage: StoragePolicy) -> Result<Brik> {
+        let Domain::Volume(domain) = self.dataset.domain() else {
+            return Err(Error::invalid(
+                "only a volume-domain dataset can become a BRIK",
+            ));
+        };
+        if self.dataset.is_sparse() {
+            return Err(Error::unsupported(
+                "a sparse volume dataset must be made dense before BRIK output",
+            ));
+        }
+        let ras = *domain
+            .affine()
+            .ok_or_else(|| Error::missing("volume-domain affine"))?;
+        // DICOM<->RAS negates the first two rows and is its own inverse.
+        let dicom = dicom_to_ras(&ras);
+        let mut builder = BrikBuilder::affine(domain.dims(), dicom)?;
+        let mut labels = Vec::with_capacity(self.dataset.columns().len());
+        for column in self.dataset.columns() {
+            if !column.values().is_numeric() {
+                return Err(Error::unsupported(format!(
+                    "text column {:?} cannot be written as a volume",
+                    column.label()
+                )));
+            }
+            let values = (0..column.len())
+                .map(|row| {
+                    column
+                        .values()
+                        .get_f64(row)
+                        .map(|value| value as f32)
+                        .ok_or_else(|| {
+                            Error::invalid(format!(
+                                "column {:?} has no numeric value at row {row}",
+                                column.label()
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            builder = builder.values(values, storage)?;
+            labels.push(column.label().to_owned());
+        }
+        builder = builder.labels(labels);
+        if let Some(step) = self.dataset.time_step_seconds() {
+            builder = builder.time_axis(TimeAxis {
+                nt: self.dataset.columns().len(),
+                origin: self.dataset.time_start_seconds().unwrap_or(0.0),
+                step,
+                duration: 0.0,
+                stored_units: TimeUnits::Seconds,
+                slice_offsets: Vec::new(),
+                slice_z_origin: 0.0,
+                slice_dz: 0.0,
+            });
+        }
+        let mut brik = builder.build()?;
+
+        if let Some(source) = &self.source_header {
+            let generated = brik.header.clone();
+            let mut header = source.clone();
+            // Values, statistics, labels, curves and timing describe the old
+            // sub-bricks. Preserve unrelated/private attributes, then overlay
+            // the newly generated structural metadata below.
+            header.attributes.retain(|attribute| {
+                let name = attribute.name.as_str();
+                !name.starts_with("BRICK_")
+                    && !name.starts_with("FDRCURVE_")
+                    && !name.starts_with("MDFCURVE_")
+                    && name != "VALUE_LABEL_DTABLE"
+                    && !matches!(name, "TAXIS_NUMS" | "TAXIS_FLOATS" | "TAXIS_OFFSETS")
+            });
+            for attribute in generated.attributes {
+                header.set(attribute.name, attribute.value);
+            }
+            brik.header = header;
+        }
+
+        let stats: Vec<Option<afni_core::stat::StatSpec>> = self
+            .dataset
+            .columns()
+            .iter()
+            .map(|column| column.stat().cloned())
+            .collect();
+        brik.header.set_brick_stats(&stats)?;
+        if let Some(table) = self
+            .dataset
+            .columns()
+            .iter()
+            .find_map(|column| column.label_table())
+        {
+            brik.header
+                .set_value_label_table(&label_table_from_core(table, BTreeMap::new()));
+        }
+        for (index, column) in self.dataset.columns().iter().enumerate() {
+            if let Some(curve) = column.fdr_curve() {
+                brik.header
+                    .set(format!("FDRCURVE_{index:06}"), curve_to_attr(curve));
+            }
+            if let Some(curve) = column.mdf_curve() {
+                brik.header
+                    .set(format!("MDFCURVE_{index:06}"), curve_to_attr(curve));
+            }
+        }
+        Ok(brik)
+    }
+
+    /// Convert the core volume into a single-file, unscaled `f32` NIfTI.
+    ///
+    /// Labels, per-frame statistics, history, label tables, curves, and
+    /// private source attributes are carried in an AFNI header extension. A
+    /// one-frame statistic is also placed in the NIfTI intent fields (using
+    /// AFNI's parameter convention for correlation); a multi-frame bucket
+    /// needs the extension because NIfTI has only one intent for the whole
+    /// file.
+    pub fn to_nifti(&self, version: NiftiVersion) -> Result<Nifti> {
+        // `to_brik(Float)` is the single checked path that already converts a
+        // dense core volume, rebuilds storage-dependent metadata, and merges
+        // source attributes. Reusing it keeps AFNI and NIfTI output identical.
+        let brik = self.to_brik(StoragePolicy::Float)?;
+        let Domain::Volume(domain) = self.dataset.domain() else {
+            unreachable!("to_brik already checked the volume domain");
+        };
+        let dimensions = domain.dims();
+        let nvols = self.dataset.columns().len();
+        if version == NiftiVersion::Nifti1
+            && dimensions
+                .into_iter()
+                .chain([nvols])
+                .any(|dimension| dimension > i16::MAX as usize)
+        {
+            return Err(Error::invalid(
+                "a NIfTI-1 dimension exceeds 32767; select NiftiVersion::Nifti2",
+            ));
+        }
+
+        let expected = domain
+            .voxel_count()
+            .checked_mul(nvols)
+            .ok_or_else(|| Error::invalid("NIfTI voxel count overflows"))?;
+        let mut values = Vec::with_capacity(expected);
+        for (frame, sub_brick) in brik.sub_bricks.iter().enumerate() {
+            values.extend(
+                sub_brick
+                    .as_ref()
+                    .ok_or_else(|| Error::missing(format!("output frame {frame}")))?
+                    .scaled_values()?,
+            );
+        }
+
+        let ras = *domain
+            .affine()
+            .ok_or_else(|| Error::missing("volume-domain affine"))?;
+        let mut dim = [1_i64; 8];
+        let time_step = self.dataset.time_step_seconds();
+        dim[0] = if nvols > 1 || time_step.is_some() {
+            4
+        } else {
+            3
+        };
+        dim[1] = dimensions[0] as i64;
+        dim[2] = dimensions[1] as i64;
+        dim[3] = dimensions[2] as i64;
+        dim[4] = nvols as i64;
+        let mut pixdim = [0.0_f64; 8];
+        pixdim[0] = 1.0;
+        for axis in 0..3 {
+            pixdim[axis + 1] = (0..3).map(|row| ras[row][axis].powi(2)).sum::<f64>().sqrt();
+        }
+        if let Some(step) = time_step {
+            pixdim[4] = step;
+        }
+        let finite_range = values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(None, |range: Option<(f32, f32)>, value| {
+                Some(match range {
+                    Some((min, max)) => (min.min(value), max.max(value)),
+                    None => (value, value),
+                })
+            });
+        let (cal_min, cal_max) = finite_range.unwrap_or((0.0, 0.0));
+        let mut header = NiftiHeader {
+            version,
+            little_endian: true,
+            dim,
+            intent_p1: 0.0,
+            intent_p2: 0.0,
+            intent_p3: 0.0,
+            intent_code: 0,
+            datatype: DataType::Float32.code(),
+            bitpix: i32::from(DataType::Float32.bitpix()),
+            slice_start: 0,
+            pixdim,
+            vox_offset: 0,
+            scl_slope: 0.0,
+            scl_inter: 0.0,
+            slice_end: dimensions[2].saturating_sub(1) as i64,
+            slice_code: 0,
+            // NIFTI_UNITS_MM, plus NIFTI_UNITS_SEC for a true time axis.
+            xyzt_units: if time_step.is_some() { 2 | 8 } else { 2 },
+            cal_max: f64::from(cal_max),
+            cal_min: f64::from(cal_min),
+            slice_duration: 0.0,
+            toffset: time_step
+                .and(self.dataset.time_start_seconds())
+                .unwrap_or(0.0),
+            descrip: "written by afni-io".into(),
+            aux_file: String::new(),
+            qform_code: 0,
+            sform_code: 1,
+            quatern_b: 0.0,
+            quatern_c: 0.0,
+            quatern_d: 0.0,
+            qoffset_x: ras[0][3],
+            qoffset_y: ras[1][3],
+            qoffset_z: ras[2][3],
+            srow_x: ras[0],
+            srow_y: ras[1],
+            srow_z: ras[2],
+            intent_name: String::new(),
+            dim_info: 0,
+            magic: match version {
+                NiftiVersion::Nifti1 => "n+1".into(),
+                NiftiVersion::Nifti2 => "n+2".into(),
+            },
+        };
+        if nvols == 1 {
+            if let Some(stat) = self.dataset.columns()[0].stat() {
+                header.intent_code = stat.kind.code() as i32;
+                for (destination, source) in [
+                    &mut header.intent_p1,
+                    &mut header.intent_p2,
+                    &mut header.intent_p3,
+                ]
+                .into_iter()
+                .zip(stat.params.iter().copied())
+                {
+                    *destination = source;
+                }
+                header.intent_name = stat.kind.name().into();
+            }
+        }
+
+        let mut nifti = Nifti {
+            header,
+            extensions: Vec::new(),
+            data: TypedArray::Float32(values),
+        };
+        nifti.set_afni_header(&brik.header);
+        Ok(nifti)
+    }
+
+    /// Write AFNI or NIfTI output, inferring the format from `path`.
+    pub fn write(&self, path: impl AsRef<Path>) -> Result<WrittenVolume> {
+        self.write_with_options(path, &VolumeWriteOptions::default())
+    }
+
+    /// Write AFNI or NIfTI output with one policy object. AFNI names and bare
+    /// prefixes select HEAD/BRIK; `.nii` and `.nii.gz` select NIfTI unless
+    /// [`VolumeWriteOptions::format`] overrides that inference.
+    pub fn write_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: &VolumeWriteOptions,
+    ) -> Result<WrittenVolume> {
+        let path = path.as_ref();
+        let format = match options.format {
+            Some(format) => format,
+            None => VolumeOutputFormat::from_path(path)?,
+        };
+        match format {
+            VolumeOutputFormat::Afni => {
+                let brik = self.to_brik(options.afni_storage)?;
+                let paths = brik.write_with_options(
+                    path,
+                    &BrikWriteOptions {
+                        overwrite: options.overwrite,
+                        history_entry: options.history_entry.clone(),
+                    },
+                )?;
+                Ok(WrittenVolume::Afni(paths))
+            }
+            VolumeOutputFormat::Nifti => {
+                let mut nifti = self.to_nifti(options.nifti_version)?;
+                if let Some(entry) = &options.history_entry {
+                    let mut header = nifti
+                        .afni_header()?
+                        .ok_or_else(|| Error::missing("generated NIfTI AFNI extension"))?;
+                    header.append_history(entry);
+                    nifti.set_afni_header(&header);
+                }
+                nifti.write_with_options(
+                    path,
+                    &NiftiWriteOptions {
+                        overwrite: options.overwrite,
+                    },
+                )?;
+                Ok(WrittenVolume::Nifti(path.to_path_buf()))
+            }
+        }
+    }
+}
+
+/// Convert a volume into a core dataset while retaining its AFNI header for a
+/// later round trip.
+pub fn volume_to_envelope(vol: &Volume) -> Result<VolumeEnvelope> {
+    Ok(VolumeEnvelope {
+        dataset: volume_to_core(vol)?,
+        source_header: vol.afni_header()?,
+    })
+}
 
 /// Convert every sub-brick of a volume into a dense core dataset on a
 /// [`VolumeDomain`], one `Float32` column per sub-brick.

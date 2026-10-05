@@ -205,6 +205,128 @@ impl Header {
         }
     }
 
+    /// Remove an attribute, returning its value when it was present.
+    pub fn remove(&mut self, name: &str) -> Option<AttributeValue> {
+        let index = self.attributes.iter().position(|a| a.name == name)?;
+        Some(self.attributes.remove(index).value)
+    }
+
+    /// The dataset history (`HISTORY_NOTE`), if present.
+    pub fn history(&self) -> Option<&str> {
+        self.string("HISTORY_NOTE")
+    }
+
+    /// Replace the dataset history (`HISTORY_NOTE`).
+    pub fn set_history(&mut self, history: impl Into<String>) {
+        self.set("HISTORY_NOTE", AttributeValue::String(history.into()));
+    }
+
+    /// Append one line to `HISTORY_NOTE`, creating the attribute when needed.
+    pub fn append_history(&mut self, entry: impl AsRef<str>) {
+        let entry = entry.as_ref();
+        let history = match self.history().filter(|s| !s.is_empty()) {
+            Some(previous) => format!("{previous}\n{entry}"),
+            None => entry.to_owned(),
+        };
+        self.set_history(history);
+    }
+
+    /// Set one label per sub-brick using AFNI's NUL-separated `BRICK_LABS`
+    /// representation. Labels containing NUL or `~` are rejected because AFNI
+    /// uses those characters as separators on disk.
+    pub fn set_brick_labels<S: AsRef<str>>(&mut self, labels: &[S]) -> Result<()> {
+        if labels.len() != self.nvals() {
+            return Err(Error::invalid(format!(
+                "got {} labels for {} sub-bricks",
+                labels.len(),
+                self.nvals()
+            )));
+        }
+        if labels.iter().any(|label| {
+            let label = label.as_ref();
+            label.contains('\0') || label.contains('~')
+        }) {
+            return Err(Error::invalid("brick labels cannot contain NUL or '~'"));
+        }
+        let mut encoded = String::new();
+        for label in labels {
+            encoded.push_str(label.as_ref());
+            encoded.push('\0');
+        }
+        self.set("BRICK_LABS", AttributeValue::String(encoded));
+        Ok(())
+    }
+
+    /// Set AFNI's time-axis attributes from a typed value.
+    pub fn set_time_axis(&mut self, axis: &TimeAxis) -> Result<()> {
+        if axis.nt == 0 {
+            return Err(Error::invalid("time axis needs at least one point"));
+        }
+        if axis.nt != self.nvals() {
+            return Err(Error::invalid(format!(
+                "time axis has {} points but header has {} sub-bricks",
+                axis.nt,
+                self.nvals()
+            )));
+        }
+        for (name, value) in [
+            ("origin", axis.origin),
+            ("step", axis.step),
+            ("duration", axis.duration),
+            ("slice_z_origin", axis.slice_z_origin),
+            ("slice_dz", axis.slice_dz),
+        ] {
+            if !value.is_finite() {
+                return Err(Error::invalid(format!("time-axis {name} is not finite")));
+            }
+        }
+        if axis.step <= 0.0 {
+            return Err(Error::invalid("time-axis step must be positive"));
+        }
+        if axis.slice_offsets.iter().any(|v| !v.is_finite()) {
+            return Err(Error::invalid("time-axis slice offset is not finite"));
+        }
+        self.set(
+            "TAXIS_NUMS",
+            AttributeValue::Int(vec![
+                axis.nt as i64,
+                axis.slice_offsets.len() as i64,
+                axis.stored_units.code(),
+            ]),
+        );
+        let stored = |seconds: f64| match axis.stored_units {
+            TimeUnits::Milliseconds => seconds * 1000.0,
+            TimeUnits::Seconds | TimeUnits::Hertz => seconds,
+        };
+        self.set(
+            "TAXIS_FLOATS",
+            AttributeValue::Float(vec![
+                stored(axis.origin),
+                stored(axis.step),
+                stored(axis.duration),
+                axis.slice_z_origin,
+                axis.slice_dz,
+            ]),
+        );
+        if axis.slice_offsets.is_empty() {
+            self.remove("TAXIS_OFFSETS");
+        } else {
+            self.set(
+                "TAXIS_OFFSETS",
+                AttributeValue::Float(axis.slice_offsets.iter().map(|&v| stored(v)).collect()),
+            );
+        }
+        Ok(())
+    }
+
+    /// Remove all time-axis attributes, turning a bucket into a non-time-series
+    /// dataset without disturbing its sub-bricks.
+    pub fn clear_time_axis(&mut self) {
+        self.remove("TAXIS_NUMS");
+        self.remove("TAXIS_FLOATS");
+        self.remove("TAXIS_OFFSETS");
+    }
+
     // --- Typed geometry accessors (mandatory attributes) -------------------
 
     /// `DATASET_RANK`: `[spatial_dims, nvals]`. The number of sub-bricks is the
@@ -503,6 +625,34 @@ impl Header {
             }
         }
         stats
+    }
+
+    /// Set one statistic description per sub-brick using AFNI's
+    /// `BRICK_STATSYM` representation. `None` is written as `none` so later
+    /// entries retain their positions. Legacy `BRICK_STATAUX` is removed.
+    pub fn set_brick_stats(&mut self, stats: &[Option<StatSpec>]) -> Result<()> {
+        if stats.len() != self.nvals() {
+            return Err(Error::invalid(format!(
+                "got {} statistics for {} sub-bricks",
+                stats.len(),
+                self.nvals()
+            )));
+        }
+        if stats.iter().all(Option::is_none) {
+            self.remove("BRICK_STATSYM");
+        } else {
+            let symbols = stats
+                .iter()
+                .map(|stat| {
+                    stat.as_ref()
+                        .map_or_else(|| "none".into(), StatSpec::to_statsym)
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            self.set("BRICK_STATSYM", AttributeValue::String(symbols + "\0"));
+        }
+        self.remove("BRICK_STATAUX");
+        Ok(())
     }
 
     /// The label table in `VALUE_LABEL_DTABLE` (set by `3drefit

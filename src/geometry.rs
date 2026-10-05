@@ -159,6 +159,15 @@ pub enum TimeUnits {
 }
 
 impl TimeUnits {
+    /// The AFNI `UNITS_*_TYPE` code written in `TAXIS_NUMS[2]`.
+    pub fn code(self) -> i64 {
+        match self {
+            Self::Milliseconds => 77001,
+            Self::Seconds => 77002,
+            Self::Hertz => 77003,
+        }
+    }
+
     /// Map a `TAXIS_NUMS[2]` code onto a variant.
     pub fn from_code(code: i64) -> Self {
         match code {

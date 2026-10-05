@@ -25,6 +25,8 @@
 //! AFNI extension, `afni/src/thd_niftiread.c` (`THD_nifti_process_afni_ext`),
 //! `thd_niftiwrite.c` and `thd_nimlatr.c`.
 
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::array::{self, DataType, TypedArray};
@@ -39,6 +41,23 @@ pub enum NiftiVersion {
     Nifti1,
     /// 540-byte NIfTI-2 header.
     Nifti2,
+}
+
+/// File-publication policy for a NIfTI write.
+///
+/// The complete file is staged and flushed next to its destination before it
+/// is published. This makes a single-file NIfTI replacement atomic on the
+/// filesystem and gives `overwrite: false` race-safe no-clobber behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NiftiWriteOptions {
+    /// Whether an existing destination file may be replaced.
+    pub overwrite: bool,
+}
+
+impl Default for NiftiWriteOptions {
+    fn default() -> Self {
+        Self { overwrite: true }
+    }
 }
 
 /// A NIfTI header, unified across versions (NIfTI-1 fields are widened to the
@@ -221,6 +240,248 @@ pub struct Nifti {
     pub data: TypedArray,
 }
 
+#[derive(Debug)]
+enum NiftiReaderSource {
+    Plain(BufReader<File>),
+    Gzip(PathBuf),
+}
+
+/// On-demand reader for one NIfTI volume at a time.
+///
+/// Only the header and extensions are loaded when the reader is opened.
+/// Uncompressed `.nii` and `.img` data are reached with absolute seeks. A
+/// `.nii.gz` stream is reopened and decoded only as far as the requested
+/// frame, keeping memory use to one frame.
+#[derive(Debug)]
+pub struct NiftiReader {
+    header: NiftiHeader,
+    extensions: Vec<NiftiExtension>,
+    data_path: PathBuf,
+    data_offset: u64,
+    dimensions: [usize; 3],
+    nvols: usize,
+    voxels: usize,
+    frame_bytes: usize,
+    source: NiftiReaderSource,
+}
+
+impl NiftiReader {
+    /// Open `.nii`, `.nii.gz`, `.hdr`, or `.img` without loading voxel data.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let requested = path.as_ref();
+        let (header_path, detached_data_path) = detached_paths(requested)?;
+        let header_prefix = read_stream_prefix(&header_path, 540)?;
+        let header = NiftiHeader::parse(&header_prefix)?;
+
+        let header_bytes = match header.version {
+            NiftiVersion::Nifti1 => 348usize,
+            NiftiVersion::Nifti2 => 540usize,
+        };
+        let (data_path, data_offset, extension_end) = if header.magic.starts_with("n+") {
+            let offset = checked_offset(header.vox_offset, "NIfTI vox_offset")?;
+            if offset < header_bytes + 4 {
+                return Err(Error::invalid(format!(
+                    "single-file NIfTI vox_offset {offset} precedes its header"
+                )));
+            }
+            (header_path.clone(), offset as u64, offset)
+        } else if header.magic.starts_with("ni") {
+            let data_path = detached_data_path.ok_or_else(|| {
+                Error::invalid(format!(
+                    "{} is a detached NIfTI header but no .img path could be resolved",
+                    header_path.display()
+                ))
+            })?;
+            let offset = checked_offset(header.vox_offset, "NIfTI vox_offset")?;
+            let header_len = stream_len(&header_path)?;
+            (data_path, offset as u64, header_len)
+        } else {
+            return Err(Error::parse(format!(
+                "unsupported NIfTI magic {:?}",
+                header.magic
+            )));
+        };
+
+        let metadata = read_stream_prefix(&header_path, extension_end.max(header_bytes + 4))?;
+        let extensions = parse_extensions(&header, &metadata, extension_end);
+        let shape = header.shape();
+        let dimension = |index: usize| shape.get(index).copied().unwrap_or(1).max(1);
+        let dimensions = [dimension(0), dimension(1), dimension(2)];
+        let voxels = dimensions
+            .iter()
+            .try_fold(1usize, |count, &value| count.checked_mul(value))
+            .ok_or_else(|| Error::invalid(format!("NIfTI dimensions {dimensions:?} overflow")))?;
+        let nvols = shape
+            .iter()
+            .skip(3)
+            .try_fold(1usize, |count, &value| count.checked_mul(value.max(1)))
+            .ok_or_else(|| Error::invalid("NIfTI volume count overflows"))?
+            .max(1);
+        let frame_bytes = voxels
+            .checked_mul(header.data_type()?.elem_size())
+            .ok_or_else(|| Error::invalid("NIfTI frame size overflows"))?;
+        let total_bytes = frame_bytes
+            .checked_mul(nvols)
+            .and_then(|bytes| (data_offset as usize).checked_add(bytes))
+            .ok_or_else(|| Error::invalid("NIfTI data size overflows"))?;
+
+        let (mut data_file, compressed) = open_and_detect_gzip(&data_path)?;
+        let source = if compressed {
+            NiftiReaderSource::Gzip(data_path.clone())
+        } else {
+            let len = data_file
+                .metadata()
+                .map_err(|source| Error::Io {
+                    path: data_path.clone(),
+                    source,
+                })?
+                .len();
+            if len < total_bytes as u64 {
+                return Err(Error::parse(format!(
+                    "{}: NIfTI data is {len} bytes but {total_bytes} are required",
+                    data_path.display()
+                )));
+            }
+            data_file
+                .seek(SeekFrom::Start(0))
+                .map_err(|source| Error::Io {
+                    path: data_path.clone(),
+                    source,
+                })?;
+            NiftiReaderSource::Plain(BufReader::new(data_file))
+        };
+
+        Ok(Self {
+            header,
+            extensions,
+            data_path,
+            data_offset,
+            dimensions,
+            nvols,
+            voxels,
+            frame_bytes,
+            source,
+        })
+    }
+
+    /// Parsed NIfTI header.
+    pub fn header(&self) -> &NiftiHeader {
+        &self.header
+    }
+
+    /// Header extensions, loaded when the reader was opened.
+    pub fn extensions(&self) -> &[NiftiExtension] {
+        &self.extensions
+    }
+
+    /// Spatial dimensions `[nx, ny, nz]`.
+    pub fn dimensions(&self) -> [usize; 3] {
+        self.dimensions
+    }
+
+    /// Number of frames (the product of dimensions four and above).
+    pub fn nvols(&self) -> usize {
+        self.nvols
+    }
+
+    /// Number of voxels per frame.
+    pub fn voxels(&self) -> usize {
+        self.voxels
+    }
+
+    /// Whether the voxel stream is gzip-compressed.
+    pub fn is_compressed(&self) -> bool {
+        matches!(self.source, NiftiReaderSource::Gzip(_))
+    }
+
+    /// Decode the AFNI header extension, when present.
+    pub fn afni_header(&self) -> Result<Option<Header>> {
+        afni_header_from_extensions(&self.extensions)
+    }
+
+    /// Load one source frame as scaled `f32` values.
+    pub fn read_frame(&mut self, frame: usize) -> Result<Vec<f32>> {
+        let mut output = vec![0.0; self.voxels];
+        self.read_frame_into(frame, &mut output)?;
+        Ok(output)
+    }
+
+    /// Copy one scaled source frame into a reusable caller-owned buffer.
+    pub fn read_frame_into(&mut self, frame: usize, output: &mut [f32]) -> Result<()> {
+        if frame >= self.nvols {
+            return Err(Error::invalid(format!(
+                "NIfTI frame {frame} is outside 0..{}",
+                self.nvols.saturating_sub(1)
+            )));
+        }
+        if output.len() != self.voxels {
+            return Err(Error::invalid(format!(
+                "frame buffer has {} values but NIfTI has {} voxels",
+                output.len(),
+                self.voxels
+            )));
+        }
+        let frame_offset = (frame as u64)
+            .checked_mul(self.frame_bytes as u64)
+            .and_then(|offset| self.data_offset.checked_add(offset))
+            .ok_or_else(|| Error::invalid("NIfTI frame offset overflows"))?;
+        let mut raw = vec![0u8; self.frame_bytes];
+        match &mut self.source {
+            NiftiReaderSource::Plain(reader) => {
+                reader
+                    .seek(SeekFrom::Start(frame_offset))
+                    .map_err(|source| Error::Io {
+                        path: self.data_path.clone(),
+                        source,
+                    })?;
+                reader.read_exact(&mut raw).map_err(|source| Error::Io {
+                    path: self.data_path.clone(),
+                    source,
+                })?;
+            }
+            NiftiReaderSource::Gzip(path) => {
+                let file = File::open(&*path).map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                let mut decoder = flate2::read::MultiGzDecoder::new(BufReader::new(file));
+                let skipped = io::copy(&mut decoder.by_ref().take(frame_offset), &mut io::sink())
+                    .map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                if skipped < frame_offset {
+                    return Err(Error::parse(format!(
+                        "{}: NIfTI stream ended at byte {skipped}, before frame {frame}",
+                        path.display()
+                    )));
+                }
+                decoder.read_exact(&mut raw).map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            }
+        }
+        let values = array::decode_binary(
+            &raw,
+            self.header.data_type()?,
+            self.header.little_endian,
+            self.voxels,
+        )?;
+        for (index, destination) in output.iter_mut().enumerate() {
+            let raw = values
+                .get_f64(index)
+                .ok_or_else(|| Error::parse("decoded NIfTI frame is too short"))?;
+            *destination = if self.header.scl_slope != 0.0 {
+                (self.header.scl_slope * raw + self.header.scl_inter) as f32
+            } else {
+                raw as f32
+            };
+        }
+        Ok(())
+    }
+}
+
 impl Nifti {
     /// Read a NIfTI volume from `.nii`, `.nii.gz`, `.hdr`, or `.img`.
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
@@ -289,35 +550,7 @@ impl Nifti {
     /// `AFNI_attributes` group. An extension that does not start with an XML
     /// prolog, or whose NIML does not parse, is an error.
     pub fn afni_header(&self) -> Result<Option<Header>> {
-        // AFNI requires esize > 32, i.e. more than 24 payload bytes.
-        let Some(ext) = self
-            .extensions
-            .iter()
-            .find(|e| e.code == ECODE_AFNI && e.data.len() > 24)
-        else {
-            return Ok(None);
-        };
-        let end = ext
-            .data
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(ext.data.len());
-        let text = std::str::from_utf8(&ext.data[..end])
-            .map_err(|e| Error::parse(format!("NIfTI AFNI extension is not UTF-8: {e}")))?;
-        if !text.starts_with("<?xml") {
-            return Err(Error::parse(
-                "NIfTI AFNI extension does not start with <?xml",
-            ));
-        }
-        let body = text
-            .find("?>")
-            .map(|i| &text[i + 2..])
-            .ok_or_else(|| Error::parse("NIfTI AFNI extension has no end to its XML prolog"))?;
-        let elements = crate::niml::parse_str(body)?;
-        Ok(elements
-            .iter()
-            .find_map(find_afni_attributes)
-            .map(Header::from_niml))
+        afni_header_from_extensions(&self.extensions)
     }
 
     /// Store `header` as the AFNI extension, replacing any existing one, in
@@ -402,7 +635,18 @@ impl Nifti {
     }
 
     /// Write to a `.nii` file, gzipping automatically for a `.nii.gz` path.
+    /// Existing files are replaced atomically.
     pub fn write(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.write_with_options(path, &NiftiWriteOptions::default())
+    }
+
+    /// Write with an explicit overwrite policy. The complete `.nii` or
+    /// `.nii.gz` is staged and flushed before publication.
+    pub fn write_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: &NiftiWriteOptions,
+    ) -> Result<()> {
         let path = path.as_ref();
         let bytes = self.to_bytes();
         let bytes = if path.extension().and_then(|e| e.to_str()) == Some("gz") {
@@ -410,8 +654,196 @@ impl Nifti {
         } else {
             bytes
         };
-        error::write_file(path, &bytes)
+        publish_nifti(path, &bytes, options.overwrite)
     }
+}
+
+/// Remove a staged file on every early return. After a successful rename its
+/// old name no longer exists, so the same cleanup remains harmless.
+#[derive(Debug)]
+struct StagedNifti(PathBuf);
+
+impl Drop for StagedNifti {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn publish_nifti(target: &Path, bytes: &[u8], overwrite: bool) -> Result<()> {
+    if target.exists() && !target.is_file() {
+        return Err(Error::invalid(format!(
+            "{} exists but is not a file",
+            target.display()
+        )));
+    }
+
+    let staged_path = unique_sibling(target, "tmp");
+    let mut staged_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged_path)
+        .map_err(|source| Error::Io {
+            path: staged_path.clone(),
+            source,
+        })?;
+    let staged = StagedNifti(staged_path);
+    staged_file
+        .write_all(bytes)
+        .and_then(|()| staged_file.sync_all())
+        .map_err(|source| Error::Io {
+            path: staged.0.clone(),
+            source,
+        })?;
+    drop(staged_file);
+
+    if !overwrite {
+        // Linking the already-flushed inode publishes without the check/write
+        // race of `exists()`, and fails if another process won the name.
+        fs::hard_link(&staged.0, target).map_err(|source| Error::Io {
+            path: target.to_path_buf(),
+            source,
+        })?;
+        return Ok(());
+    }
+
+    // A same-directory rename is the single-file commit point: readers see
+    // either the previous complete file or the new complete file.
+    fs::rename(&staged.0, target).map_err(|source| Error::Io {
+        path: target.to_path_buf(),
+        source,
+    })
+}
+
+fn unique_sibling(target: &Path, suffix: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "volume.nii".into());
+    loop {
+        let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(
+            ".{name}.afni-io-{}-{sequence}.{suffix}",
+            std::process::id()
+        ));
+        if !path.exists() {
+            return path;
+        }
+    }
+}
+
+fn afni_header_from_extensions(extensions: &[NiftiExtension]) -> Result<Option<Header>> {
+    // AFNI requires esize > 32, i.e. more than 24 payload bytes.
+    let Some(ext) = extensions
+        .iter()
+        .find(|e| e.code == ECODE_AFNI && e.data.len() > 24)
+    else {
+        return Ok(None);
+    };
+    let end = ext
+        .data
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(ext.data.len());
+    let text = std::str::from_utf8(&ext.data[..end])
+        .map_err(|e| Error::parse(format!("NIfTI AFNI extension is not UTF-8: {e}")))?;
+    if !text.starts_with("<?xml") {
+        return Err(Error::parse(
+            "NIfTI AFNI extension does not start with <?xml",
+        ));
+    }
+    let body = text
+        .find("?>")
+        .map(|i| &text[i + 2..])
+        .ok_or_else(|| Error::parse("NIfTI AFNI extension has no end to its XML prolog"))?;
+    let elements = crate::niml::parse_str(body)?;
+    Ok(elements
+        .iter()
+        .find_map(find_afni_attributes)
+        .map(Header::from_niml))
+}
+
+fn detached_paths(requested: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
+    let name = requested
+        .to_str()
+        .ok_or_else(|| Error::invalid("non-UTF-8 NIfTI path"))?;
+    if let Some(stem) = name.strip_suffix(".hdr") {
+        Ok((
+            requested.to_path_buf(),
+            Some(PathBuf::from(format!("{stem}.img"))),
+        ))
+    } else if let Some(stem) = name.strip_suffix(".img") {
+        Ok((
+            PathBuf::from(format!("{stem}.hdr")),
+            Some(requested.to_path_buf()),
+        ))
+    } else {
+        Ok((requested.to_path_buf(), None))
+    }
+}
+
+fn checked_offset(offset: i64, name: &str) -> Result<usize> {
+    usize::try_from(offset)
+        .map_err(|_| Error::invalid(format!("{name} is not a valid byte offset: {offset}")))
+}
+
+fn open_and_detect_gzip(path: &Path) -> Result<(File, bool)> {
+    let mut file = File::open(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut magic = [0u8; 2];
+    let count = file.read(&mut magic).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.seek(SeekFrom::Start(0)).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok((file, crate::compress::is_gzip(&magic[..count])))
+}
+
+fn read_stream_prefix(path: &Path, bytes: usize) -> Result<Vec<u8>> {
+    let (file, compressed) = open_and_detect_gzip(path)?;
+    let reader: Box<dyn Read> = if compressed {
+        Box::new(flate2::read::MultiGzDecoder::new(BufReader::new(file)))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    let mut output = Vec::with_capacity(bytes.min(1 << 20));
+    reader
+        .take(bytes as u64)
+        .read_to_end(&mut output)
+        .map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(output)
+}
+
+fn stream_len(path: &Path) -> Result<usize> {
+    let (file, compressed) = open_and_detect_gzip(path)?;
+    if !compressed {
+        return file
+            .metadata()
+            .map(|metadata| metadata.len() as usize)
+            .map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+    }
+    let mut decoder = flate2::read::MultiGzDecoder::new(BufReader::new(file));
+    let mut output = Vec::new();
+    decoder
+        .read_to_end(&mut output)
+        .map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(output.len())
 }
 
 /// The `AFNI_attributes` group: `element` itself or, as AFNI does with

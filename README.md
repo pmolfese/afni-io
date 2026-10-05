@@ -44,7 +44,7 @@ accessors. `Brik::read_sub_bricks` loads only the sub-bricks you ask for, and
 builds one from scratch. Binary NIML (`binary.lsbfirst` / `binary.msbfirst`)
 is also read.
 
-**One volume API** (`volume::read_any`): AFNI and NIfTI volumes read the same
+**One volume API** (`volume::read_any` and `VolumeReader`): AFNI and NIfTI volumes read the same
 way. You get the grid, the number of volumes, the `ijk -> RAS` matrix, each
 volume as scaled `f32`, and labels and statistics (from the `.HEAD` or the
 NIfTI's AFNI extension).
@@ -136,6 +136,162 @@ A small CLI that dispatches on extension lives in `examples/inspect.rs`:
 ```sh
 cargo run --example inspect -- path/to/file.niml.dset
 ```
+
+## Writing an AFNI-style command
+
+The higher-level volume API is intended to cover the routine work that an
+AFNI C program normally performs with `THD_*` and `EDIT_*`: read scaled data,
+check grids, extract voxel time series, construct an output on an existing
+grid, choose its disk representation, attach metadata, and write it without
+silently replacing an existing dataset.
+
+```rust,no_run
+use afni_io::prelude::*;
+
+fn run(input_name: &str, mask_name: &str, output_name: &str) -> Result<()> {
+    // AFNI HEAD/BRIK and NIfTI inputs use the same read/access API.
+    let input = read_any(input_name)?;
+    let mask_volume = read_any(mask_name)?;
+    let mask = VolumeMask::from_nonzero(&mask_volume, 0)?;
+    mask.require_grid(&input.grid()?, 1e-5)?;
+
+    // Checked access gives a useful error for an absent/non-scalar frame.
+    let first_frame = input.frame(0)?;
+    let mean_inside_mask = first_frame
+        .iter()
+        .zip(mask.values())
+        .filter_map(|(&value, &selected)| selected.then_some(value))
+        .sum::<f32>()
+        / mask.count() as f32;
+    println!("mean = {mean_inside_mask}");
+
+    // Time series are scaled to their true values, independent of how each
+    // input sub-brick is stored. `voxel_series_into` accepts a reusable buffer
+    // when this operation is performed in a loop.
+    let series = input.voxel_series_ijk(10, 12, 4)?;
+    println!("voxel has {} time points", series.len());
+
+    // Make an AFNI output on exactly the source grid, retaining an oblique
+    // affine when the source has one. AutoShort chooses BRICK_FLOAT_FACS and
+    // quantizes to signed shorts; use StoragePolicy::Float for lossless f32.
+    let source = input
+        .as_afni()
+        .ok_or_else(|| Error::invalid("this output example requires an AFNI input"))?;
+    let output = BrikBuilder::like_grid(source)?
+        .values(first_frame, StoragePolicy::AutoShort)?
+        .labels(["masked mean input"])
+        .build()?;
+
+    output.write_with_options(
+        output_name,
+        &BrikWriteOptions {
+            overwrite: false,
+            history_entry: Some(std::env::args().collect::<Vec<_>>().join(" ")),
+        },
+    )?;
+    Ok(())
+}
+# Ok::<(), afni_io::Error>(())
+```
+
+For a new grid, use `BrikBuilder::cardinal` or `BrikBuilder::affine`. A loaded
+`Brik` can also be edited with `replace_sub_brick`, `push_sub_brick`, and
+`set_brick_labels`. `Header` has typed setters for history, labels, time axes,
+and per-brick statistics. For algorithms that operate through `afni-core`,
+`adapt::volume_to_envelope` and `VolumeEnvelope::to_brik` preserve source
+attributes that core does not model while rebuilding storage-dependent ones.
+
+HEAD/BRIK output is staged and flushed in the destination directory before it
+is published. The BRIK is installed first and the HEAD last, so a new dataset
+is not discoverable until both files are ready. Replacing an existing pair
+temporarily moves the old files to private backups and restores them if any
+commit step fails. `overwrite: false` uses atomic no-replace publication, so a
+file created by another process during the write is not silently overwritten.
+As with any two-file format, the operating system cannot replace the pair in a
+single syscall; rollback covers reported I/O failures, while abrupt process or
+machine termination can leave clearly named hidden staging/backup files for
+manual recovery.
+
+The same processed volume can be written as AFNI or NIfTI without changing the
+algorithm. `Volume::write` and `VolumeEnvelope::write` infer the format from the
+output name: `.nii`/`.nii.gz` means NIfTI, an AFNI `+view` name means
+HEAD/BRIK, and a bare prefix follows AFNI command-line convention. Use one
+options type for either format:
+
+```rust,no_run
+use afni_io::prelude::*;
+
+let input = read_any("stats+orig")?;
+let output = VolumeBuilder::like(&input)?
+    .values(input.frame(0)?)?
+    .labels(["processed statistic"])
+    .history("created by the Rust implementation")
+    .build()?;
+let options = VolumeWriteOptions {
+    overwrite: false,
+    history_entry: Some("3dRustCommand -input stats+orig".into()),
+    afni_storage: StoragePolicy::AutoShort,
+    nifti_version: NiftiVersion::Nifti2,
+    ..VolumeWriteOptions::default()
+};
+
+// The same values and semantic metadata can target either representation.
+output.write_with_options("result+orig", &options)?;
+output.write_with_options("result.nii.gz", &options)?;
+# Ok::<(), afni_io::Error>(())
+```
+
+For algorithms using `afni-core`, call the same methods on `VolumeEnvelope`;
+`to_brik` and `to_nifti` are available when the concrete in-memory format is
+needed. Both outputs retain the grid, values, labels, timing, statistics,
+history, label tables, and FDR/MDF curves. NIfTI stores values as unscaled
+`f32` and carries AFNI-specific or per-frame metadata in its AFNI extension.
+Single-frame statistics are also written to the NIfTI intent fields (with
+AFNI's three-parameter convention for correlation).
+NIfTI publication is staged and atomic, and no-clobber mode is race-safe.
+Detached `.hdr`/`.img` output is deliberately rejected for now.
+
+### Select and stream frames
+
+`VolumeReader` reads only metadata when it opens a dataset and keeps at most
+one decoded frame in memory. Its path accepts AFNI's trailing sub-brick syntax:
+
+```rust,no_run
+use afni_io::prelude::*;
+
+// Inclusive ranges, `$` for the last frame, strides, descending ranges,
+// labels, duplicates, and caller-specified order are supported.
+let mut input = VolumeReader::open("rest+orig[0,10..$(5),Full_Fstat]")?;
+println!("source frames: {:?}", input.selected_indices());
+println!("selected labels: {:?}", input.labels());
+
+// Reuse one allocation while processing an arbitrarily large time series.
+let mut frame = vec![0.0; input.voxels()];
+for t in 0..input.nvols() {
+    input.frame_into(t, &mut frame)?;
+    // Process `frame` here; the other frames remain on disk.
+}
+
+// Or use an iterator, which likewise loads one frame at a time.
+for frame in input.frames() {
+    let frame = frame?;
+    println!("first voxel: {}", frame[0]);
+}
+# Ok::<(), afni_io::Error>(())
+```
+
+The same interface handles `.HEAD`/`.BRIK`, `.BRIK.gz`, `.nii`, `.nii.gz`,
+and detached `.hdr`/`.img` pairs. Ordinary files use absolute seeks. Gzip
+files are reopened and streamed up to the requested frame, which stays
+memory-bounded but means the decoding cost grows with the source-frame offset.
+Repeated random access to late gzip frames is therefore more expensive than
+using the eager `read_any` API when the entire dataset fits in memory.
+
+`read_any("rest+orig[0,2,$]")` also accepts selectors and materializes only
+those frames into the ordinary eager `Volume` representation. Labels,
+statistics, and timing metadata follow AFNI's selector behavior: the source TR
+is retained for any multi-frame result, while a single selected frame becomes
+a bucket without a time axis.
 
 ## Design
 

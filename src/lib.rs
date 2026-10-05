@@ -63,6 +63,7 @@ pub mod nifti;
 pub mod niml;
 pub mod onedee;
 pub mod roi;
+pub mod selector;
 pub mod spec;
 pub mod stat;
 pub mod stc;
@@ -77,20 +78,30 @@ pub use error::{Error, Result};
 
 /// Re-exports of the most commonly used types.
 pub mod prelude {
+    pub use crate::adapt::{
+        VolumeBuilder, VolumeEnvelope, VolumeOutputFormat, VolumeWriteOptions, WrittenVolume,
+    };
     pub use crate::array::{DataType, TypedArray};
-    pub use crate::brik::{AfniPaths, BrickData, Brik, BrikType, SubBrick};
+    pub use crate::brik::{
+        AfniPaths, BrickData, Brik, BrikBuilder, BrikReader, BrikType, BrikWriteOptions,
+        ScaledValues, StoragePolicy, SubBrick,
+    };
     pub use crate::dset::{ColumnRange, NimlDataset};
     pub use crate::error::{Error, Result};
     pub use crate::geometry::{Mat44, Orientation, TimeAxis, TimeUnits, View};
     pub use crate::gifti::{DataArray, Gifti};
     pub use crate::head::{Attribute, AttributeValue, Header};
     pub use crate::labels::{LabelEntry, LabelTable};
-    pub use crate::nifti::{Nifti, NiftiHeader, NiftiVersion};
+    pub use crate::nifti::{Nifti, NiftiHeader, NiftiReader, NiftiVersion, NiftiWriteOptions};
     pub use crate::niml::{NimlData, NimlElement, NimlValue, NimlValueType};
     pub use crate::onedee::OneD;
     pub use crate::roi::{BrushAction, NodeRoi, RoiDatum, RoiDrawingType, RoiElementType, Side};
+    pub use crate::selector::{DatasetSpec, SubBrickSelector};
     pub use crate::spec::{Spec, SpecSurface};
     pub use crate::stat::{StatKind, StatSpec, ThresholdCurve};
     pub use crate::surface::Surface;
-    pub use crate::volume::{read_any, read_any_volumes, Volume};
+    pub use crate::volume::{
+        read_any, read_any_volumes, GridCompatibility, GridSpec, Volume, VolumeFormat,
+        VolumeFrames, VolumeMask, VolumeReader,
+    };
 }

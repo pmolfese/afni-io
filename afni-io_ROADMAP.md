@@ -21,7 +21,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 | 7 | GIfTI swap in sumaru | ⬜ |
 | 8 | Remaining formats | ✅ |
 | 9 | AFNI talk protocol encoding | ✅ |
-| 10 | Beyond sumaru's current needs | ⬜ |
+| 10 | Beyond sumaru's current needs | 🚧 |
 | — | Moving sumaru onto afni-io (you, separately) | ⬜ see checklist |
 
 ---
@@ -205,9 +205,26 @@ pure encoding and never opens a socket. Checked against AFNI's source
 
 Public API (new): `afni_io::talk` (feature `talk`). Coordinates are RAI; `talk::flip_xy` converts from RAS (GIfTI). Sockets, threads, message routing and DriveSuma command parsing stay in sumaru.
 
-## Phase 10 — Beyond sumaru's current needs ⬜
+## Phase 10 — Beyond sumaru's current needs 🚧
 
-- [ ] FreeSurfer annot/curv/label/MGH, `.1D.dset` and `[]{}` selectors
+- [x] AFNI-command programming layer: checked frame and voxel-series access,
+  reusable scaled-value buffers, grid specifications and validated masks,
+  cardinal/oblique BRIK builders, float/auto-short storage policies, safe
+  sub-brick mutation, typed history/label/time/stat setters, no-clobber write
+  options, and volume envelopes for round trips through `afni-core`
+- [x] Volume sub-brick selectors: ordered indices and inclusive ranges,
+  ascending/descending strides, `$`, longest-match labels, duplicates, and
+  selectors applied to both AFNI and NIfTI sources
+- [x] Frame-at-a-time `VolumeReader`: direct seeks for plain BRIK/NIfTI,
+  memory-bounded gzip access, reusable buffers and frame iteration
+- [x] Transactional HEAD/BRIK writing: same-directory staging, file flushes,
+  BRIK-first/HEAD-last publication, race-safe no-clobber mode, and restoration
+  of an existing pair after a reported commit failure
+- [x] Format-neutral volume output: `Volume` and `VolumeEnvelope` choose AFNI
+  or NIfTI from the destination (or an override), share overwrite/history
+  policy, preserve common semantic metadata, support NIfTI-1/2 and gzip, and
+  publish single-file NIfTI output atomically
+- [ ] FreeSurfer annot/curv/label/MGH, `.1D.dset` and `.1D` `{}` row selectors
 - [ ] PLY, SureFit/1D `.coord`/`.topo`, BYU, BrainVoyager `.srf`, MNI `.obj`, STL; GIfTI `ExternalFileBinary`
 - [ ] NIfTI complex and RGB datatypes (see the Phase 4 log); streaming / single-volume NIfTI reads
 
