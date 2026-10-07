@@ -13,14 +13,24 @@
 
 use std::path::Path;
 
+use afni_core::dataset::Dataset;
+use afni_core::domain::{Domain, DomainId, VolumeDomain};
+use afni_core::mask::SampleMask;
+
 use crate::array::{DataType, TypedArray};
 use crate::brik::{AfniPaths, Brik, BrikReader};
 use crate::error::{Error, Result};
 use crate::geometry::{dicom_to_ras, Mat44};
 use crate::head::{AttributeValue, Header};
-use crate::nifti::{Nifti, NiftiReader};
+use crate::nifti::{Nifti, NiftiExtension, NiftiHeader, NiftiReader};
 use crate::selector::DatasetSpec;
 use crate::stat::StatSpec;
+
+/// Default absolute affine tolerance for matching file grids to core domains.
+///
+/// AFNI geometry is commonly serialized through decimal or `f32` header
+/// fields, so exact bit equality is too strict after a format round trip.
+pub const DEFAULT_GRID_TOLERANCE: f64 = 1.0e-5;
 
 /// A volume read by [`read_any`].
 #[derive(Debug, Clone)]
@@ -200,6 +210,25 @@ impl VolumeReader {
         self.source_header.as_ref()
     }
 
+    /// Original NIfTI header when the source is NIfTI. This is source
+    /// metadata; dimensions and transforms still describe the unselected
+    /// source, while [`dimensions`](Self::dimensions) and
+    /// [`selected_indices`](Self::selected_indices) describe the logical view.
+    pub fn nifti_header(&self) -> Option<&NiftiHeader> {
+        match &self.source {
+            VolumeReaderSource::Nifti(reader) => Some(reader.header()),
+            VolumeReaderSource::Afni(_) => None,
+        }
+    }
+
+    /// Raw NIfTI extensions in file order, or `None` for an AFNI source.
+    pub fn nifti_extensions(&self) -> Option<&[NiftiExtension]> {
+        match &self.source {
+            VolumeReaderSource::Nifti(reader) => Some(reader.extensions()),
+            VolumeReaderSource::Afni(_) => None,
+        }
+    }
+
     /// One label per selected frame.
     pub fn labels(&self) -> &[String] {
         &self.labels
@@ -313,6 +342,18 @@ impl VolumeReader {
                 Ok(Volume::Nifti(Box::new(nifti)))
             }
         }
+    }
+
+    /// Load every selected frame into an `afni-core` dataset while retaining
+    /// the source metadata required for AFNI or NIfTI output.
+    ///
+    /// This consumes the reader because the result is the eager counterpart to
+    /// this streaming interface. Programs that only need one frame at a time
+    /// should continue using [`frame`](Self::frame),
+    /// [`frame_into`](Self::frame_into), or [`frames`](Self::frames).
+    pub fn into_dataset(self) -> Result<crate::adapt::VolumeDataset> {
+        let volume = self.into_volume()?;
+        crate::adapt::volume_to_dataset(&volume)
     }
 
     /// Read the selected time series at flat voxel `index`.
@@ -466,9 +507,70 @@ pub struct GridSpec {
 }
 
 impl GridSpec {
+    /// Construct and validate a format-neutral RAS grid.
+    pub fn new(dimensions: [usize; 3], ijk_to_ras: Mat44) -> Result<Self> {
+        VolumeDomain::new(None, dimensions, Some(ijk_to_ras)).map_err(core_error)?;
+        Ok(Self {
+            dimensions,
+            ijk_to_ras,
+        })
+    }
+
     /// Number of voxels in the grid.
     pub fn voxels(&self) -> usize {
         self.dimensions.iter().product()
+    }
+
+    /// Convert this I/O grid into a core volume domain.
+    ///
+    /// `id` lets a caller preserve an AFNI domain identifier when one is
+    /// available. Use `None` for an anonymous grid.
+    pub fn to_domain(&self, id: Option<DomainId>) -> Result<VolumeDomain> {
+        VolumeDomain::new(id, self.dimensions, Some(self.ijk_to_ras)).map_err(core_error)
+    }
+
+    /// World position of fractional voxel coordinates in the common RAS frame.
+    pub fn ijk_to_world(&self, ijk: [f64; 3]) -> Result<[f64; 3]> {
+        self.to_domain(None)?.ijk_to_world(ijk).map_err(core_error)
+    }
+
+    /// Fractional voxel coordinates corresponding to a RAS world position.
+    pub fn world_to_ijk(&self, world: [f64; 3]) -> Result<[f64; 3]> {
+        self.to_domain(None)?
+            .world_to_ijk(world)
+            .map_err(core_error)
+    }
+
+    /// Checked i-fastest linear index of voxel `(i, j, k)`.
+    pub fn linear_index(&self, i: i64, j: i64, k: i64) -> Result<usize> {
+        self.to_domain(None)?
+            .linear_index(i, j, k)
+            .map_err(core_error)
+    }
+
+    /// Checked `(i, j, k)` coordinates of an i-fastest linear index.
+    pub fn ijk(&self, index: usize) -> Result<[usize; 3]> {
+        self.to_domain(None)?.ijk(index).map_err(core_error)
+    }
+
+    /// Describe a cropped sub-grid with an affine-correct new origin.
+    pub fn crop(&self, start: [usize; 3], dimensions: [usize; 3]) -> Result<Self> {
+        Self::try_from(
+            &self
+                .to_domain(None)?
+                .crop(start, dimensions)
+                .map_err(core_error)?,
+        )
+    }
+
+    /// Describe a padded grid with an affine-correct new origin.
+    pub fn pad(&self, before: [usize; 3], after: [usize; 3]) -> Result<Self> {
+        Self::try_from(
+            &self
+                .to_domain(None)?
+                .pad(before, after)
+                .map_err(core_error)?,
+        )
     }
 
     /// Compare dimensions and affine entries. `tolerance` is an absolute
@@ -488,6 +590,39 @@ impl GridSpec {
                 && max_affine_difference <= tolerance,
             max_affine_difference,
         }
+    }
+}
+
+impl TryFrom<&VolumeDomain> for GridSpec {
+    type Error = Error;
+
+    fn try_from(domain: &VolumeDomain) -> Result<Self> {
+        let ijk_to_ras = domain
+            .affine()
+            .copied()
+            .ok_or_else(|| Error::missing("volume domain affine"))?;
+        Self::new(domain.dims(), ijk_to_ras)
+    }
+}
+
+impl TryFrom<&Domain> for GridSpec {
+    type Error = Error;
+
+    fn try_from(domain: &Domain) -> Result<Self> {
+        match domain {
+            Domain::Volume(volume) => Self::try_from(volume),
+            Domain::Surface(_) => Err(Error::invalid(
+                "a surface domain cannot be converted to a volume grid",
+            )),
+        }
+    }
+}
+
+impl TryFrom<&GridSpec> for VolumeDomain {
+    type Error = Error;
+
+    fn try_from(grid: &GridSpec) -> Result<Self> {
+        grid.to_domain(None)
     }
 }
 
@@ -530,6 +665,25 @@ pub struct VolumeMask {
 }
 
 impl VolumeMask {
+    /// Read the first selected frame of an AFNI or NIfTI mask.
+    ///
+    /// A trailing dataset selector is honored. Finite nonzero values are
+    /// selected; zero, NaN, and infinity are excluded.
+    pub fn read(path: impl AsRef<Path>) -> Result<Self> {
+        let mut reader = VolumeReader::open(path)?;
+        Self::from_reader(&mut reader, 0)
+    }
+
+    /// Read one logical frame from a lazy reader as a finite-nonzero mask.
+    pub fn from_reader(reader: &mut VolumeReader, frame: usize) -> Result<Self> {
+        let values = reader
+            .frame(frame)?
+            .into_iter()
+            .map(|value| value.is_finite() && value != 0.0)
+            .collect();
+        Self::new(reader.grid(), values)
+    }
+
     /// Build a mask from one volume, selecting finite nonzero values. AFNI's
     /// float extraction likewise removes NaN and infinity before mask creation.
     pub fn from_nonzero(volume: &Volume, frame: usize) -> Result<Self> {
@@ -546,6 +700,7 @@ impl VolumeMask {
 
     /// Build from explicit values and a grid.
     pub fn new(grid: GridSpec, values: Vec<bool>) -> Result<Self> {
+        grid.to_domain(None)?;
         if values.len() != grid.voxels() {
             return Err(Error::invalid(format!(
                 "mask has {} voxels but grid has {}",
@@ -577,6 +732,60 @@ impl VolumeMask {
             .compatibility(grid, tolerance)
             .require_compatible()
     }
+
+    /// Convert this file mask into a core mask on `dataset`'s exact domain.
+    ///
+    /// Dimensions and affine are checked with [`DEFAULT_GRID_TOLERANCE`]. On
+    /// success the resulting [`SampleMask`] retains the dataset's complete
+    /// domain, including its identifier, so all later core operations can use
+    /// their normal exact-domain checks.
+    pub fn for_dataset(&self, dataset: &Dataset) -> Result<SampleMask> {
+        self.for_dataset_with_tolerance(dataset, DEFAULT_GRID_TOLERANCE)
+    }
+
+    /// Like [`for_dataset`](Self::for_dataset), with an explicit absolute
+    /// affine tolerance in world units.
+    pub fn for_dataset_with_tolerance(
+        &self,
+        dataset: &Dataset,
+        tolerance: f64,
+    ) -> Result<SampleMask> {
+        let Domain::Volume(domain) = dataset.domain() else {
+            return Err(Error::invalid(
+                "a volume mask cannot be applied to a surface dataset",
+            ));
+        };
+        self.to_sample_mask(domain, tolerance)
+    }
+
+    /// Convert to a core mask on a compatible volume domain.
+    pub fn to_sample_mask(&self, domain: &VolumeDomain, tolerance: f64) -> Result<SampleMask> {
+        let domain_grid = GridSpec::try_from(domain)?;
+        self.require_grid(&domain_grid, tolerance)?;
+        SampleMask::new(Domain::Volume(domain.clone()), self.values.clone()).map_err(core_error)
+    }
+
+    /// Convert a core volume mask back to the I/O-facing representation.
+    pub fn from_sample_mask(mask: &SampleMask) -> Result<Self> {
+        let Domain::Volume(domain) = mask.domain() else {
+            return Err(Error::invalid(
+                "a surface sample mask cannot be converted to a volume mask",
+            ));
+        };
+        Self::new(GridSpec::try_from(domain)?, mask.values().to_vec())
+    }
+}
+
+impl TryFrom<&SampleMask> for VolumeMask {
+    type Error = Error;
+
+    fn try_from(mask: &SampleMask) -> Result<Self> {
+        Self::from_sample_mask(mask)
+    }
+}
+
+fn core_error(error: afni_core::Error) -> Error {
+    Error::invalid(error.to_string())
 }
 
 /// Read an AFNI dataset or a NIfTI volume, choosing by name.

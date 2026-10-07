@@ -516,7 +516,7 @@ impl Default for BrikWriteOptions {
 /// `.BRIK.gz` is matched before `.BRIK`.
 const FILE_SUFFIXES: [&str; 5] = [".BRIK.bz2", ".BRIK.gz", ".BRIK.Z", ".BRIK", ".HEAD"];
 /// AFNI view names, as the `+view` part of `prefix+view`.
-const VIEWS: [&str; 3] = ["+orig", "+acpc", "+tlrc"];
+pub(crate) const VIEWS: [&str; 3] = ["+orig", "+acpc", "+tlrc"];
 
 impl AfniPaths {
     /// Whether `path` is spelled like an AFNI dataset: it ends in `.HEAD`,
@@ -576,7 +576,7 @@ impl AfniPaths {
 
     /// The dataset name without any file suffix or trailing `.`, e.g.
     /// `dir/anat+orig`.
-    fn base_name(path: &Path) -> Option<String> {
+    pub(crate) fn base_name(path: &Path) -> Option<String> {
         let text = path.to_str()?;
         if let Some(base) = FILE_SUFFIXES.iter().find_map(|s| text.strip_suffix(s)) {
             return Some(base.to_string());
@@ -1507,7 +1507,7 @@ fn auxiliary_path(target: &Path, role: &str, suffix: &str) -> PathBuf {
     ))
 }
 
-fn commit_staged_pair(
+pub(crate) fn commit_staged_pair(
     staged_head: &Path,
     staged_brik: &Path,
     target_head: &Path,

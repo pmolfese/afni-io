@@ -493,3 +493,21 @@ affects the design, with the phase it was found in.
   `BRICK_FLOAT_FACS[0]`, so multi-sub-brick and mixed-datum datasets aren't
   handled there. That's one reason to finish Phase 1 before moving sumaru onto
   the crate.
+- **2026-10-06 · Unified surface-dataset reader.** Added the eager
+  `SurfaceDatasetReader` entry point for NIML `.niml.dset` and GIfTI dataset
+  arrays. It detects the format from the document root (including outer-gzip
+  inputs), adapts both formats to the same `afni_core::dataset::Dataset`, and
+  accepts an optional domain node count for genuinely sparse datasets. Explicit
+  identity node lists infer their domain size automatically. NIML extras and
+  the original GIfTI document remain available for format-specific metadata and
+  writing; geometry-only GIfTI remains in the separate surface-geometry API.
+- **2026-10-07 · Core grid and mask bridges.** `GridSpec` now converts directly
+  to and from `afni_core::VolumeDomain` and exposes the core grid's checked
+  linear-index, world-coordinate, crop, and pad operations. `VolumeMask::read`
+  loads a finite-nonzero file mask, while `for_dataset` validates its grid and
+  produces a `SampleMask` carrying the target dataset's exact core domain.
+  Reverse conversion is also checked.
+- **2026-10-07 · AFNI affine transform files.** Added `aff12` support for
+  one-row static and multi-row/per-volume `*.aff12.1D` transforms. Parsing
+  validates the core affine type, comments round-trip, one-row reads can be
+  required explicitly, and writing refuses silent RAS-to-RAI reinterpretation.

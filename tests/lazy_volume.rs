@@ -103,6 +103,51 @@ fn lazy_nifti_plain_and_gzip_match_eager_values() {
 }
 
 #[test]
+fn volume_dataset_is_the_eager_counterpart_to_volume_reader() {
+    let path = selected_name("volume/timeseries+orig.HEAD", "2,0,2");
+
+    let loaded = VolumeDataset::open(&path).unwrap();
+    let from_reader = VolumeReader::open(&path).unwrap().into_dataset().unwrap();
+
+    assert_eq!(loaded.dataset, from_reader.dataset);
+    assert_eq!(loaded.metadata, from_reader.metadata);
+    assert_eq!(loaded.dataset.columns().len(), 3);
+    assert_eq!(
+        loaded
+            .dataset
+            .columns()
+            .iter()
+            .map(|column| column.label())
+            .collect::<Vec<_>>(),
+        ["#2", "#0", "#2"]
+    );
+    assert_eq!(loaded.dataset().time_step_seconds(), Some(2.0));
+
+    let (dataset, metadata) = loaded.into_parts();
+    assert_eq!(dataset.columns().len(), 3);
+    assert!(metadata.afni_header.is_some());
+}
+
+#[test]
+fn volume_dataset_loads_nifti_values_and_retains_nifti_metadata() {
+    let loaded = VolumeDataset::open(common::data("volume/stat.nii")).unwrap();
+    let raw = read_any(common::data("volume/stat.nii")).unwrap();
+
+    assert_eq!(loaded.dataset.columns().len(), raw.nvols());
+    assert_eq!(
+        loaded
+            .dataset
+            .columns()
+            .iter()
+            .map(|column| column.label())
+            .collect::<Vec<_>>(),
+        raw.labels().unwrap()
+    );
+    assert!(loaded.metadata.nifti.is_some());
+    assert!(loaded.metadata.afni_header.is_some());
+}
+
+#[test]
 fn nifti_selectors_use_afni_extension_labels() {
     let eager = read_any(common::data("volume/stat.nii")).unwrap();
     let labels = eager.labels().unwrap();

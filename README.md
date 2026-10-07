@@ -24,6 +24,7 @@ code); the only dependencies are
 | `spec` | SUMA surface spec files, as SUMA resolves them (`Spec::resolve`) | `.spec` | ✅ | ✅ |
 | `surface` | FreeSurfer/SUMA ASCII surfaces | `.asc` | ✅ | ✅ |
 | `gifti` | GIfTI surface/data XML | `.gii`, `.gii.gz`, `.gii.dset` | ✅ | ✅ |
+| `surface_dataset` | NIML or GIfTI surface data through one core-facing API | `.niml.dset`, `.gii.dset`, `*.gii` | ✅ | NIML |
 | `nifti` | NIfTI-1 / NIfTI-2 volumes, with header extensions (incl. AFNI's) | `.nii`, `.nii.gz`, `.hdr`/`.img` | ✅ | ✅ |
 | `volume` | Either of the above through one API (`read_any`) | any of the above | ✅ | — |
 | `onedee` | Numeric text tables | `.1D` | ✅ | ✅ |
@@ -48,6 +49,14 @@ is also read.
 way. You get the grid, the number of volumes, the `ijk -> RAS` matrix, each
 volume as scaled `f32`, and labels and statistics (from the `.HEAD` or the
 NIfTI's AFNI extension).
+
+**One surface-dataset API** (`SurfaceDatasetReader`): `.niml.dset` and GIfTI
+data files open as the same validated `afni_core::Dataset`. Format detection
+uses the document root, not just the suffix. Dense datasets need only a path;
+genuinely sparse datasets also need the surface's complete node count through
+`SurfaceDatasetReadOptions`. Reading is eager because the XML/NIML container is
+decoded as a whole. NIML inputs retain their extra attributes for lossless
+write-back, while GIfTI inputs retain the original document for inspection.
 
 **NIML** (`niml`): numeric columns are stored in their declared type
 (`byte`/`short`/`int`/`float`/`double`), so a `float` dataset takes half the
@@ -100,9 +109,10 @@ label tables. Writing emits ASCII or Base64.
 ```rust
 use afni_io::prelude::*;
 
-// Surface dataset
-let dset = NimlDataset::read("lh.thickness.niml.dset")?;
-println!("{} nodes x {} columns", dset.rows(), dset.column_count());
+// Either surface-dataset format through one API
+let surface_data = SurfaceDatasetReader::open("lh.thickness.niml.dset")?;
+let dset = surface_data.dataset();
+println!("{} stored nodes x {} columns", dset.row_count(), dset.columns().len());
 
 // Volume
 let brik = Brik::read("anat+orig.HEAD")?;
@@ -194,11 +204,48 @@ fn run(input_name: &str, mask_name: &str, output_name: &str) -> Result<()> {
 # Ok::<(), afni_io::Error>(())
 ```
 
+For core-facing programs, the file mask bridge removes the manual grid check
+and Boolean copy:
+
+```rust,no_run
+use afni_io::prelude::*;
+
+let input = VolumeDataset::open("stats+orig")?;
+let file_mask = VolumeMask::read("mask+orig")?;
+let mask = file_mask.for_dataset(input.dataset())?;
+println!("{} selected voxels", mask.count());
+# Ok::<(), afni_io::Error>(())
+```
+
+`GridSpec` and `afni_core::VolumeDomain` have checked conversions in both
+directions. Both expose i-fastest linear indexing, `ijk_to_world`,
+`world_to_ijk`, and affine-correct `crop` and `pad` grid descriptions. A file
+mask can therefore become a domain-checked `SampleMask` without program code
+copying its Boolean values or reconstructing a domain.
+
+AFNI spatial transforms are separate from those grid affines. A one-row or
+multi-row `*.aff12.1D` file is read into validated core transform types:
+
+```rust,no_run
+use afni_io::prelude::*;
+
+let transforms = read_aff12_series("motion.aff12.1D")?;
+let moved = transforms.apply_point(0, [10.0, 20.0, 30.0])?;
+let inverse = transforms.inverse()?;
+write_aff12_series("motion_inverse.aff12.1D", &inverse)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Use `read_aff12_transform` when exactly one row is required. `Aff12File`
+preserves comments. Files are explicitly AFNI DICOM/RAI; a RAS transform must
+be converted before it can be written, preventing a silent coordinate-system
+mistake.
+
 For a new grid, use `BrikBuilder::cardinal` or `BrikBuilder::affine`. A loaded
 `Brik` can also be edited with `replace_sub_brick`, `push_sub_brick`, and
 `set_brick_labels`. `Header` has typed setters for history, labels, time axes,
 and per-brick statistics. For algorithms that operate through `afni-core`,
-`adapt::volume_to_envelope` and `VolumeEnvelope::to_brik` preserve source
+`VolumeDataset::open` and `VolumeDataset::to_brik` preserve source
 attributes that core does not model while rebuilding storage-dependent ones.
 
 HEAD/BRIK output is staged and flushed in the destination directory before it
@@ -213,7 +260,7 @@ machine termination can leave clearly named hidden staging/backup files for
 manual recovery.
 
 The same processed volume can be written as AFNI or NIfTI without changing the
-algorithm. `Volume::write` and `VolumeEnvelope::write` infer the format from the
+algorithm. `Volume::write` and `VolumeDataset::write` infer the format from the
 output name: `.nii`/`.nii.gz` means NIfTI, an AFNI `+view` name means
 HEAD/BRIK, and a bare prefix follows AFNI command-line convention. Use one
 options type for either format:
@@ -241,15 +288,51 @@ output.write_with_options("result.nii.gz", &options)?;
 # Ok::<(), afni_io::Error>(())
 ```
 
-For algorithms using `afni-core`, call the same methods on `VolumeEnvelope`;
+For algorithms using `afni-core`, open a `VolumeDataset` and call the same
+methods on it;
 `to_brik` and `to_nifti` are available when the concrete in-memory format is
 needed. Both outputs retain the grid, values, labels, timing, statistics,
-history, label tables, and FDR/MDF curves. NIfTI stores values as unscaled
-`f32` and carries AFNI-specific or per-frame metadata in its AFNI extension.
+history, label tables, and FDR/MDF curves. `VolumeMetadata` additionally keeps
+detailed slice timing, the original NIfTI header template, and arbitrary NIfTI
+extensions that `afni-core` does not model. Structural fields are regenerated,
+so retained metadata cannot restore stale dimensions, transforms, or scaling.
+NIfTI stores values as unscaled `f32` and carries AFNI-specific or per-frame metadata in its AFNI extension.
 Single-frame statistics are also written to the NIfTI intent fields (with
 AFNI's three-parameter convention for correlation).
 NIfTI publication is staged and atomic, and no-clobber mode is race-safe.
 Detached `.hdr`/`.img` output is deliberately rejected for now.
+
+### Load a volume for an `afni-core` algorithm
+
+`VolumeDataset` is the ordinary eager type for a command that needs the whole
+dataset. It reads all selected frames into an `afni-core::Dataset` and keeps the
+source-only metadata beside it for a later AFNI or NIfTI write:
+
+```rust,no_run
+use afni_io::prelude::*;
+
+let source = VolumeDataset::open("rest+orig[0..99]")?;
+let result = afni_core::processing::summarize_time_series(
+    source.dataset(),
+    None,
+    [afni_core::processing::TimeSeriesStatistic::Mean.output("mean", 0.0)?],
+    afni_core::numeric::NonFinitePolicy::Skip,
+)?;
+
+// The result keeps the source grid and safe source-only metadata. Labels,
+// statistics, timing, dimensions, datatype, and scaling are rebuilt from the
+// newly computed Dataset rather than copied from the input frames.
+source
+    .derive(result)?
+    .with_history("3dRustMean -input rest+orig[0..99]")
+    .write("mean+orig")?;
+# Ok::<(), afni_io::Error>(())
+```
+
+`VolumeDataset::open` is therefore the convenient default for most programs.
+Use `VolumeReader` when the algorithm can operate frame-by-frame and should not
+hold every frame in memory. Calling `VolumeReader::into_dataset` explicitly
+crosses from that lazy interface to the fully loaded representation.
 
 ### Select and stream frames
 
@@ -286,6 +369,35 @@ files are reopened and streamed up to the requested frame, which stays
 memory-bounded but means the decoding cost grows with the source-frame offset.
 Repeated random access to late gzip frames is therefore more expensive than
 using the eager `read_any` API when the entire dataset fits in memory.
+
+`VolumeFrameWriter` is the matching memory-bounded output API. Declare the
+grid and frame metadata first, then hand it one processed frame at a time. It
+writes directly to a hidden staging file, supports gzip and AFNI short
+scaling, and does not publish a partial dataset if processing fails early:
+
+```rust,no_run
+use afni_io::prelude::*;
+
+let mut input = VolumeReader::open("rest+orig")?;
+let spec = VolumeWriteSpec::like_reader(&input)?;
+let options = VolumeWriteOptions {
+    afni_storage: StoragePolicy::AutoShort,
+    history_entry: Some("3dRustCommand -input rest+orig".into()),
+    ..VolumeWriteOptions::default()
+};
+let mut output = VolumeFrameWriter::create("result+orig.BRIK.gz", spec, options)?;
+let mut frame = vec![0.0; input.voxels()];
+for t in 0..input.nvols() {
+    input.frame_into(t, &mut frame)?;
+    // Transform `frame` in place here.
+    output.write_frame(&frame)?;
+}
+output.finish()?;
+# Ok::<(), afni_io::Error>(())
+```
+
+The same code can target `.nii` or `.nii.gz` by changing the output name.
+`finish()` also verifies that the declared number of frames was supplied.
 
 `read_any("rest+orig[0,2,$]")` also accepts selectors and materializes only
 those frames into the ordinary eager `Volume` representation. Labels,

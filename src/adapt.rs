@@ -42,6 +42,8 @@
 //! Adapters from file types to [`afni_core::dataset::Dataset`].
 
 use std::collections::BTreeMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use afni_core::column::{ColumnData, ColumnRange, ColumnRole, DataColumn, RecordedRange};
@@ -54,22 +56,27 @@ use afni_core::roi::{Roi as CoreRoi, RoiStroke as CoreStroke};
 use afni_core::stat::{IntentOrigin, StatSpec};
 
 use crate::array::{DataType, TypedArray};
-use crate::brik::{AfniPaths, Brik, BrikBuilder, BrikWriteOptions, StoragePolicy};
+use crate::brik::{
+    commit_staged_pair, AfniPaths, Brik, BrikBuilder, BrikType, BrikWriteOptions, StoragePolicy,
+    SubBrick, VIEWS,
+};
 use crate::dset::NimlDataset;
 use crate::error::{Error, Result};
-use crate::geometry::{dicom_to_ras, TimeAxis, TimeUnits};
+use crate::geometry::{dicom_to_ras, TimeAxis, TimeUnits, View};
 use crate::gifti::{self, Gifti};
 use crate::graph::{GraphBucket, MatrixShape, NodeRow};
 use crate::head::{AttributeValue, Header};
 use crate::labels::{LabelEntry, LabelTable};
-use crate::nifti::{Nifti, NiftiHeader, NiftiVersion, NiftiWriteOptions};
+use crate::nifti::{
+    Nifti, NiftiExtension, NiftiHeader, NiftiVersion, NiftiWriteOptions, ECODE_AFNI,
+};
 use crate::niml::{NimlElement, NumericMatrix};
 use crate::onedee::OneD;
 use crate::roi::{NodeRoi, RoiDatum};
 use crate::stat::ThresholdCurve;
 use crate::surface::Surface;
 use crate::tract::{RawBundle, RawTract, TractNetwork};
-use crate::volume::{GridSpec, Volume};
+use crate::volume::{GridSpec, Volume, VolumeReader};
 
 /// Convert a core error into this crate's error type.
 fn core_err(e: afni_core::Error) -> Error {
@@ -695,19 +702,84 @@ pub fn gifti_to_core_with(
 // Volumes
 // ---------------------------------------------------------------------------
 
-/// A file-neutral volume dataset together with an optional source AFNI header.
+/// NIfTI-only metadata that is not represented by an `afni-core` dataset.
 ///
-/// The header preserves history and private attributes while the core dataset
-/// is processed. [`VolumeEnvelope::to_brik`] and [`VolumeEnvelope::to_nifti`]
-/// regenerate structural and per-frame attributes so stale storage metadata
-/// is not copied.
+/// The original header is a template, not an instruction to reproduce stale
+/// dimensions, scaling, datatype, or transforms. Those structural fields are
+/// regenerated from the edited dataset. Slice acquisition fields, descriptive
+/// text, and arbitrary extensions are retained.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NiftiMetadata {
+    /// Original unified NIfTI header.
+    pub header: NiftiHeader,
+    /// Original extensions in file order, including private extension codes.
+    /// A stale AFNI extension is replaced with the regenerated one on output.
+    pub extensions: Vec<NiftiExtension>,
+}
+
+/// File metadata that has no complete representation in `afni-core`.
+///
+/// Keeping this as one object makes metadata transfer explicit for programs
+/// that construct a new dataset, stream frames, or convert between AFNI and
+/// NIfTI. The detailed time axis is separate from the AFNI header so slice
+/// offsets survive even while storage-dependent header attributes are rebuilt.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VolumeMetadata {
+    /// Original AFNI attributes, from a `.HEAD` or NIfTI AFNI extension.
+    pub afni_header: Option<Header>,
+    /// Detailed timing, including acquisition duration and per-slice offsets.
+    pub time_axis: Option<TimeAxis>,
+    /// NIfTI header template and all raw extensions, for NIfTI sources.
+    pub nifti: Option<NiftiMetadata>,
+}
+
+impl VolumeMetadata {
+    /// Copy source-only metadata from a lazy reader without loading a frame.
+    pub fn from_reader(reader: &VolumeReader) -> Self {
+        let afni_header = reader.afni_header().cloned();
+        let nifti = reader.nifti_header().map(|header| NiftiMetadata {
+            header: header.clone(),
+            extensions: reader.nifti_extensions().unwrap_or_default().to_vec(),
+        });
+        let time_axis = afni_header
+            .as_ref()
+            .and_then(Header::time_axis)
+            .or_else(|| {
+                nifti
+                    .as_ref()
+                    .and_then(|metadata| nifti_time_axis(&metadata.header))
+            });
+        Self {
+            afni_header,
+            time_axis,
+            nifti,
+        }
+    }
+}
+
+/// A fully loaded, file-neutral volume dataset with its source-only metadata.
+///
+/// This is the convenient in-memory type for AFNI-style programs: voxel values
+/// live in the format-neutral [`Dataset`], while metadata needed for a faithful
+/// AFNI or NIfTI write remains attached. Use [`VolumeReader`] instead when the
+/// computation should read selected frames without loading the complete volume.
+///
+/// [`VolumeDataset::to_brik`] and [`VolumeDataset::to_nifti`] regenerate
+/// structural and per-frame attributes so stale storage metadata is not copied.
 #[derive(Debug, Clone)]
-pub struct VolumeEnvelope {
+pub struct VolumeDataset {
     /// File-neutral values and semantic metadata.
     pub dataset: Dataset,
-    /// Original AFNI attributes, when the source had them.
-    pub source_header: Option<Header>,
+    /// Metadata not fully represented by the core dataset.
+    pub metadata: VolumeMetadata,
 }
+
+/// Previous name for [`VolumeDataset`].
+///
+/// Kept as an alias so programs written against the earlier pre-1.0 API keep
+/// compiling. New code should use `VolumeDataset`, which states that values are
+/// fully loaded rather than merely wrapped for conversion.
+pub type VolumeEnvelope = VolumeDataset;
 
 /// Disk format selected by the format-neutral volume writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -788,6 +860,743 @@ impl WrittenVolume {
     }
 }
 
+/// Geometry and metadata declared before a frame-at-a-time volume write.
+///
+/// A streaming writer needs the number and meaning of its frames before voxel
+/// bytes are emitted, just as an AFNI program normally creates a dataset shell
+/// before filling its sub-bricks. Only one caller-supplied frame is retained at
+/// a time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VolumeWriteSpec {
+    /// Spatial grid in voxel-to-RAS convention.
+    pub grid: GridSpec,
+    /// Exact number of frames the writer must receive.
+    pub frame_count: usize,
+    /// One label per frame.
+    pub labels: Vec<String>,
+    /// One optional statistical description per frame.
+    pub stats: Vec<Option<StatSpec>>,
+    /// Detailed timing, including optional per-slice offsets.
+    pub time_axis: Option<TimeAxis>,
+    /// Source-only metadata to preserve.
+    pub metadata: VolumeMetadata,
+}
+
+impl VolumeWriteSpec {
+    /// Declare a new streaming output. Labels default to `#0`, `#1`, ... and
+    /// statistics default to none.
+    pub fn new(grid: GridSpec, frame_count: usize) -> Result<Self> {
+        VolumeDomain::new(None, grid.dimensions, Some(grid.ijk_to_ras)).map_err(core_err)?;
+        if frame_count == 0 {
+            return Err(Error::invalid("a volume output needs at least one frame"));
+        }
+        Ok(Self {
+            grid,
+            frame_count,
+            labels: (0..frame_count).map(|frame| format!("#{frame}")).collect(),
+            stats: vec![None; frame_count],
+            time_axis: None,
+            metadata: VolumeMetadata::default(),
+        })
+    }
+
+    /// Declare output with the grid, frame count, labels, statistics, timing,
+    /// and private metadata of an already-loaded volume.
+    pub fn like(source: &Volume) -> Result<Self> {
+        let metadata = volume_metadata(source)?;
+        Ok(Self::new(source.grid()?, source.nvols())?
+            .labels(source.labels()?)
+            .stats(source.stats()?)
+            .time_axis_opt(metadata.time_axis.clone())
+            .metadata(metadata))
+    }
+
+    /// Declare output from a lazy reader's selected logical frames, without
+    /// loading any voxel values.
+    pub fn like_reader(source: &VolumeReader) -> Result<Self> {
+        let metadata = VolumeMetadata::from_reader(source);
+        Ok(Self::new(source.grid(), source.nvols())?
+            .labels(source.labels().iter().cloned())
+            .stats(source.stats().iter().cloned())
+            .time_axis_opt(metadata.time_axis.clone())
+            .metadata(metadata))
+    }
+
+    /// Set one label per frame. Counts and reserved separators are checked
+    /// when [`VolumeFrameWriter::create`] starts the output.
+    pub fn labels<S: Into<String>>(mut self, labels: impl IntoIterator<Item = S>) -> Self {
+        self.labels = labels.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set one optional statistic per frame.
+    pub fn stats(mut self, stats: impl IntoIterator<Item = Option<StatSpec>>) -> Self {
+        self.stats = stats.into_iter().collect();
+        self
+    }
+
+    /// Set a detailed time axis. Its `nt` is normalised to `frame_count` when
+    /// the writer starts.
+    pub fn time_axis(mut self, axis: TimeAxis) -> Self {
+        self.time_axis = Some(axis);
+        self
+    }
+
+    fn time_axis_opt(mut self, axis: Option<TimeAxis>) -> Self {
+        self.time_axis = axis;
+        self
+    }
+
+    /// Retain source-only AFNI/NIfTI metadata.
+    pub fn metadata(mut self, metadata: VolumeMetadata) -> Self {
+        if self.time_axis.is_none() {
+            self.time_axis = metadata.time_axis.clone();
+        }
+        self.metadata = metadata;
+        self
+    }
+
+    fn validate(&mut self) -> Result<()> {
+        if self.labels.len() != self.frame_count {
+            return Err(Error::invalid(format!(
+                "got {} labels for {} frames",
+                self.labels.len(),
+                self.frame_count
+            )));
+        }
+        if self.stats.len() != self.frame_count {
+            return Err(Error::invalid(format!(
+                "got {} statistics for {} frames",
+                self.stats.len(),
+                self.frame_count
+            )));
+        }
+        if self
+            .labels
+            .iter()
+            .any(|label| label.contains('\0') || label.contains('~'))
+        {
+            return Err(Error::invalid("volume labels cannot contain NUL or '~'"));
+        }
+        if let Some(axis) = self.time_axis.as_mut() {
+            axis.nt = self.frame_count;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StreamFrameRecord {
+    brik_type: BrikType,
+    factor: f32,
+    range: [f64; 2],
+}
+
+#[derive(Debug)]
+struct StreamStage(PathBuf);
+
+impl Drop for StreamStage {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+#[derive(Debug)]
+enum StreamFile {
+    Plain(File),
+    Gzip(flate2::write::GzEncoder<File>),
+}
+
+impl StreamFile {
+    fn new(file: File, gzip: bool) -> Self {
+        if gzip {
+            Self::Gzip(flate2::write::GzEncoder::new(
+                file,
+                flate2::Compression::default(),
+            ))
+        } else {
+            Self::Plain(file)
+        }
+    }
+
+    fn finish(self, path: &Path) -> Result<()> {
+        let file = match self {
+            Self::Plain(file) => file,
+            Self::Gzip(encoder) => encoder.finish().map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?,
+        };
+        file.sync_all().map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+}
+
+impl Write for StreamFile {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(file) => file.write(buffer),
+            Self::Gzip(encoder) => encoder.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(file) => file.flush(),
+            Self::Gzip(encoder) => encoder.flush(),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum VolumeFrameOutput {
+    Afni {
+        head: PathBuf,
+        brik: PathBuf,
+        view: Option<View>,
+        stage: StreamStage,
+        writer: StreamFile,
+        records: Vec<StreamFrameRecord>,
+    },
+    Nifti {
+        target: PathBuf,
+        stage: StreamStage,
+        writer: StreamFile,
+    },
+}
+
+/// A transactional, frame-at-a-time sink for AFNI or NIfTI output.
+///
+/// `write_frame` accepts true `f32` values in i-fastest order. AFNI storage
+/// conversion and gzip compression happen immediately; NIfTI emits unscaled
+/// `f32`. The destination remains untouched until [`finish`](Self::finish)
+/// verifies that every declared frame arrived and atomically publishes the
+/// staged output.
+#[derive(Debug)]
+pub struct VolumeFrameWriter {
+    spec: VolumeWriteSpec,
+    options: VolumeWriteOptions,
+    frames_written: usize,
+    output: VolumeFrameOutput,
+}
+
+impl VolumeFrameWriter {
+    /// Start a streaming output. Format inference is identical to
+    /// [`VolumeEnvelope::write_with_options`].
+    pub fn create(
+        path: impl AsRef<Path>,
+        mut spec: VolumeWriteSpec,
+        options: VolumeWriteOptions,
+    ) -> Result<Self> {
+        spec.validate()?;
+        let path = path.as_ref();
+        let format = options
+            .format
+            .map_or_else(|| VolumeOutputFormat::from_path(path), Ok)?;
+        let output = match format {
+            VolumeOutputFormat::Afni => {
+                let (head, brik, view, gzip) = afni_stream_targets(
+                    path,
+                    spec.metadata.afni_header.as_ref(),
+                    options.overwrite,
+                )?;
+                let (stage, file) = create_stream_stage(&brik, "brik")?;
+                VolumeFrameOutput::Afni {
+                    head,
+                    brik,
+                    view,
+                    stage,
+                    writer: StreamFile::new(file, gzip),
+                    records: Vec::with_capacity(spec.frame_count),
+                }
+            }
+            VolumeOutputFormat::Nifti => {
+                validate_nifti_dimensions(&spec, options.nifti_version)?;
+                prepare_single_target(path, options.overwrite)?;
+                let (stage, file) = create_stream_stage(path, "nifti")?;
+                let gzip = path.extension().and_then(|extension| extension.to_str()) == Some("gz");
+                let mut writer = StreamFile::new(file, gzip);
+                let mut afni_header = streaming_afni_header(
+                    &spec,
+                    &vec![
+                        StreamFrameRecord {
+                            brik_type: BrikType::Float,
+                            factor: 0.0,
+                            range: [0.0, 0.0],
+                        };
+                        spec.frame_count
+                    ],
+                    None,
+                )?;
+                // Streaming values have not arrived yet, so do not claim an
+                // incorrect range in the AFNI extension.
+                afni_header.remove("BRICK_STATS");
+                if let Some(entry) = &options.history_entry {
+                    afni_header.append_history(entry);
+                }
+                let header = streaming_nifti_header(&spec, options.nifti_version)?;
+                let extensions = spec
+                    .metadata
+                    .nifti
+                    .as_ref()
+                    .map(|metadata| {
+                        metadata
+                            .extensions
+                            .iter()
+                            .filter(|extension| extension.code != ECODE_AFNI)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut nifti = Nifti {
+                    header,
+                    extensions,
+                    data: TypedArray::Float32(Vec::new()),
+                };
+                nifti.set_afni_header(&afni_header);
+                writer
+                    .write_all(&nifti.to_bytes())
+                    .map_err(|source| Error::Io {
+                        path: stage.0.clone(),
+                        source,
+                    })?;
+                VolumeFrameOutput::Nifti {
+                    target: path.to_path_buf(),
+                    stage,
+                    writer,
+                }
+            }
+        };
+        Ok(Self {
+            spec,
+            options,
+            frames_written: 0,
+            output,
+        })
+    }
+
+    /// Number of frames successfully accepted so far.
+    pub fn frames_written(&self) -> usize {
+        self.frames_written
+    }
+
+    /// Append one complete frame. The input slice is not retained after this
+    /// method returns.
+    pub fn write_frame(&mut self, values: &[f32]) -> Result<()> {
+        if self.frames_written == self.spec.frame_count {
+            return Err(Error::invalid(format!(
+                "writer already received all {} declared frames",
+                self.spec.frame_count
+            )));
+        }
+        if values.len() != self.spec.grid.voxels() {
+            return Err(Error::invalid(format!(
+                "frame has {} voxels but grid has {}",
+                values.len(),
+                self.spec.grid.voxels()
+            )));
+        }
+        match &mut self.output {
+            VolumeFrameOutput::Afni {
+                stage,
+                writer,
+                records,
+                ..
+            } => {
+                let sub_brick = SubBrick::from_f32(values.to_vec(), self.options.afni_storage)?;
+                let record = StreamFrameRecord {
+                    brik_type: sub_brick.brik_type(),
+                    factor: sub_brick.factor,
+                    range: sub_brick.stats(),
+                };
+                writer
+                    .write_all(&sub_brick.data.to_le_bytes())
+                    .map_err(|source| Error::Io {
+                        path: stage.0.clone(),
+                        source,
+                    })?;
+                records.push(record);
+            }
+            VolumeFrameOutput::Nifti { stage, writer, .. } => {
+                for value in values {
+                    writer
+                        .write_all(&value.to_le_bytes())
+                        .map_err(|source| Error::Io {
+                            path: stage.0.clone(),
+                            source,
+                        })?;
+                }
+            }
+        }
+        self.frames_written += 1;
+        Ok(())
+    }
+
+    /// Flush and atomically publish the completed dataset.
+    pub fn finish(self) -> Result<WrittenVolume> {
+        if self.frames_written != self.spec.frame_count {
+            return Err(Error::invalid(format!(
+                "writer received {} of {} declared frames",
+                self.frames_written, self.spec.frame_count
+            )));
+        }
+        match self.output {
+            VolumeFrameOutput::Afni {
+                head,
+                brik,
+                view,
+                stage,
+                writer,
+                records,
+            } => {
+                writer.finish(&stage.0)?;
+                let mut header = streaming_afni_header(&self.spec, &records, view)?;
+                if let Some(entry) = &self.options.history_entry {
+                    header.append_history(entry);
+                }
+                let (head_stage, mut head_file) = create_stream_stage(&head, "head")?;
+                head_file
+                    .write_all(header.to_head_string().as_bytes())
+                    .and_then(|()| head_file.sync_all())
+                    .map_err(|source| Error::Io {
+                        path: head_stage.0.clone(),
+                        source,
+                    })?;
+                drop(head_file);
+                commit_staged_pair(
+                    &head_stage.0,
+                    &stage.0,
+                    &head,
+                    &brik,
+                    self.options.overwrite,
+                )?;
+                Ok(WrittenVolume::Afni(AfniPaths {
+                    head,
+                    brik: Some(brik),
+                }))
+            }
+            VolumeFrameOutput::Nifti {
+                target,
+                stage,
+                writer,
+            } => {
+                writer.finish(&stage.0)?;
+                publish_stream_stage(&stage.0, &target, self.options.overwrite)?;
+                Ok(WrittenVolume::Nifti(target))
+            }
+        }
+    }
+}
+
+fn streaming_afni_header(
+    spec: &VolumeWriteSpec,
+    records: &[StreamFrameRecord],
+    view: Option<View>,
+) -> Result<Header> {
+    if records.len() != spec.frame_count {
+        return Err(Error::invalid("streaming frame metadata count mismatch"));
+    }
+    let dicom = dicom_to_ras(&spec.grid.ijk_to_ras);
+    // BrikBuilder centralises AFNI's geometry attributes. A single temporary
+    // zero frame is enough to obtain that header; it is dropped before this
+    // function returns and never scales with the number of output frames.
+    let mut generated = BrikBuilder::affine(spec.grid.dimensions, dicom)?
+        .values(vec![0.0; spec.grid.voxels()], StoragePolicy::Float)?
+        .build()?
+        .header;
+    generated.set(
+        "DATASET_RANK",
+        AttributeValue::Int(vec![3, spec.frame_count as i64]),
+    );
+    generated.set(
+        "BRICK_TYPES",
+        AttributeValue::Int(
+            records
+                .iter()
+                .map(|record| record.brik_type.code())
+                .collect(),
+        ),
+    );
+    generated.set(
+        "BRICK_FLOAT_FACS",
+        AttributeValue::Float(
+            records
+                .iter()
+                .map(|record| f64::from(record.factor))
+                .collect(),
+        ),
+    );
+    generated.set(
+        "BRICK_STATS",
+        AttributeValue::Float(records.iter().flat_map(|record| record.range).collect()),
+    );
+    if let Some(view) = view {
+        generated.set("SCENE_DATA", AttributeValue::Int(vec![view as i64, 11, 1]));
+    }
+    generated.set_brick_labels(&spec.labels)?;
+    if let Some(axis) = &spec.time_axis {
+        generated.set_time_axis(axis)?;
+    }
+
+    let mut header = match &spec.metadata.afni_header {
+        Some(source) => {
+            let mut header = source.clone();
+            header.attributes.retain(|attribute| {
+                let name = attribute.name.as_str();
+                !name.starts_with("BRICK_")
+                    && !name.starts_with("FDRCURVE_")
+                    && !name.starts_with("MDFCURVE_")
+                    && name != "VALUE_LABEL_DTABLE"
+                    && !matches!(name, "TAXIS_NUMS" | "TAXIS_FLOATS" | "TAXIS_OFFSETS")
+            });
+            for attribute in generated.attributes {
+                header.set(attribute.name, attribute.value);
+            }
+            header
+        }
+        None => generated,
+    };
+    header.set_brick_stats(&spec.stats)?;
+    Ok(header)
+}
+
+fn validate_nifti_dimensions(spec: &VolumeWriteSpec, version: NiftiVersion) -> Result<()> {
+    if version == NiftiVersion::Nifti1
+        && spec
+            .grid
+            .dimensions
+            .into_iter()
+            .chain([spec.frame_count])
+            .any(|dimension| dimension > i16::MAX as usize)
+    {
+        return Err(Error::invalid(
+            "a NIfTI-1 dimension exceeds 32767; select NiftiVersion::Nifti2",
+        ));
+    }
+    Ok(())
+}
+
+fn streaming_nifti_header(spec: &VolumeWriteSpec, version: NiftiVersion) -> Result<NiftiHeader> {
+    validate_nifti_dimensions(spec, version)?;
+    let dimensions = spec.grid.dimensions;
+    let ras = spec.grid.ijk_to_ras;
+    let source = spec
+        .metadata
+        .nifti
+        .as_ref()
+        .map(|metadata| &metadata.header);
+    let same_slice_grid = source.is_some_and(|header| {
+        header.dim[1].max(0) as usize == dimensions[0]
+            && header.dim[2].max(0) as usize == dimensions[1]
+            && header.dim[3].max(0) as usize == dimensions[2]
+    });
+    let mut dim = [1_i64; 8];
+    dim[0] = if spec.frame_count > 1 || spec.time_axis.is_some() {
+        4
+    } else {
+        3
+    };
+    dim[1] = dimensions[0] as i64;
+    dim[2] = dimensions[1] as i64;
+    dim[3] = dimensions[2] as i64;
+    dim[4] = spec.frame_count as i64;
+    let mut pixdim = [0.0_f64; 8];
+    pixdim[0] = 1.0;
+    for axis in 0..3 {
+        pixdim[axis + 1] = (0..3).map(|row| ras[row][axis].powi(2)).sum::<f64>().sqrt();
+    }
+    if let Some(axis) = &spec.time_axis {
+        pixdim[4] = axis.step;
+    }
+    let spatial_units = source
+        .map(|header| header.xyzt_units & 0x07)
+        .filter(|units| *units != 0)
+        .unwrap_or(2);
+    let mut header = NiftiHeader {
+        version,
+        little_endian: true,
+        dim,
+        intent_p1: 0.0,
+        intent_p2: 0.0,
+        intent_p3: 0.0,
+        intent_code: 0,
+        datatype: DataType::Float32.code(),
+        bitpix: i32::from(DataType::Float32.bitpix()),
+        slice_start: source
+            .filter(|_| same_slice_grid)
+            .map_or(0, |header| header.slice_start),
+        pixdim,
+        vox_offset: 0,
+        scl_slope: 0.0,
+        scl_inter: 0.0,
+        slice_end: source
+            .filter(|_| same_slice_grid)
+            .map_or(dimensions[2].saturating_sub(1) as i64, |header| {
+                header.slice_end
+            }),
+        slice_code: source
+            .filter(|_| same_slice_grid)
+            .map_or(0, |header| header.slice_code),
+        xyzt_units: spatial_units | if spec.time_axis.is_some() { 8 } else { 0 },
+        cal_max: 0.0,
+        cal_min: 0.0,
+        slice_duration: source.filter(|_| same_slice_grid).map_or(0.0, |header| {
+            header.slice_duration * nifti_seconds_per_time_unit(header)
+        }),
+        toffset: spec.time_axis.as_ref().map_or(0.0, |axis| axis.origin),
+        descrip: source
+            .map(|header| header.descrip.clone())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "written by afni-io".into()),
+        aux_file: source
+            .map(|header| header.aux_file.clone())
+            .unwrap_or_default(),
+        qform_code: 0,
+        sform_code: 1,
+        quatern_b: 0.0,
+        quatern_c: 0.0,
+        quatern_d: 0.0,
+        qoffset_x: ras[0][3],
+        qoffset_y: ras[1][3],
+        qoffset_z: ras[2][3],
+        srow_x: ras[0],
+        srow_y: ras[1],
+        srow_z: ras[2],
+        intent_name: String::new(),
+        dim_info: source
+            .filter(|_| same_slice_grid)
+            .map_or(0, |header| header.dim_info),
+        magic: match version {
+            NiftiVersion::Nifti1 => "n+1".into(),
+            NiftiVersion::Nifti2 => "n+2".into(),
+        },
+    };
+    if spec.frame_count == 1 {
+        if let Some(stat) = &spec.stats[0] {
+            header.intent_code = stat.kind.code() as i32;
+            for (destination, source) in [
+                &mut header.intent_p1,
+                &mut header.intent_p2,
+                &mut header.intent_p3,
+            ]
+            .into_iter()
+            .zip(stat.params.iter().copied())
+            {
+                *destination = source;
+            }
+            header.intent_name = stat.kind.name().into();
+        }
+    }
+    Ok(header)
+}
+
+fn afni_stream_targets(
+    path: &Path,
+    source_header: Option<&Header>,
+    overwrite: bool,
+) -> Result<(PathBuf, PathBuf, Option<View>, bool)> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| Error::invalid("non-UTF-8 dataset path"))?;
+    let gzip = text.ends_with(".BRIK.gz");
+    let (base, view) = match AfniPaths::base_name(path) {
+        Some(base) => {
+            let view = VIEWS
+                .iter()
+                .position(|suffix| base.ends_with(suffix))
+                .and_then(|index| View::from_code(index as i64));
+            (base, view)
+        }
+        None => {
+            let view = source_header.and_then(Header::view).unwrap_or(View::Orig);
+            (format!("{text}{}", view.suffix()), Some(view))
+        }
+    };
+    let head = PathBuf::from(format!("{base}.HEAD"));
+    let brik = PathBuf::from(format!("{base}.BRIK{}", if gzip { ".gz" } else { "" }));
+    let other = PathBuf::from(format!("{base}.BRIK{}", if gzip { "" } else { ".gz" }));
+    if other.exists() {
+        return Err(Error::invalid(format!(
+            "{} exists; remove it before writing {}",
+            other.display(),
+            brik.display()
+        )));
+    }
+    for target in [&head, &brik] {
+        if target.exists() && !target.is_file() {
+            return Err(Error::invalid(format!(
+                "{} exists but is not a file",
+                target.display()
+            )));
+        }
+        if !overwrite && target.exists() {
+            return Err(Error::invalid(format!(
+                "{} exists; enable overwrite to replace it",
+                target.display()
+            )));
+        }
+    }
+    Ok((head, brik, view, gzip))
+}
+
+fn prepare_single_target(target: &Path, overwrite: bool) -> Result<()> {
+    if target.exists() && !target.is_file() {
+        return Err(Error::invalid(format!(
+            "{} exists but is not a file",
+            target.display()
+        )));
+    }
+    if !overwrite && target.exists() {
+        return Err(Error::invalid(format!(
+            "{} exists; enable overwrite to replace it",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+fn create_stream_stage(target: &Path, role: &str) -> Result<(StreamStage, File)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "volume".into());
+    for _ in 0..100 {
+        let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(
+            ".{name}.afni-io-{role}-{}-{sequence}.tmp",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((StreamStage(path), file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => return Err(Error::Io { path, source }),
+        }
+    }
+    Err(Error::invalid(format!(
+        "could not create a unique staging file next to {}",
+        target.display()
+    )))
+}
+
+fn publish_stream_stage(staged: &Path, target: &Path, overwrite: bool) -> Result<()> {
+    if !overwrite {
+        fs::hard_link(staged, target).map_err(|source| Error::Io {
+            path: target.to_path_buf(),
+            source,
+        })?;
+        return Ok(());
+    }
+    fs::rename(staged, target).map_err(|source| Error::Io {
+        path: target.to_path_buf(),
+        source,
+    })
+}
+
 /// Builder for a new file-neutral volume dataset.
 ///
 /// Geometry is supplied in the common voxel-to-RAS convention. Frames are
@@ -803,7 +1612,7 @@ pub struct VolumeBuilder {
     time_step_seconds: Option<f64>,
     time_start_seconds: Option<f64>,
     history: Option<String>,
-    source_header: Option<Header>,
+    metadata: VolumeMetadata,
 }
 
 impl VolumeBuilder {
@@ -818,7 +1627,7 @@ impl VolumeBuilder {
             time_step_seconds: None,
             time_start_seconds: None,
             history: None,
-            source_header: None,
+            metadata: VolumeMetadata::default(),
         })
     }
 
@@ -827,7 +1636,11 @@ impl VolumeBuilder {
     /// and per-frame metadata are deliberately not copied.
     pub fn like(source: &Volume) -> Result<Self> {
         let mut builder = Self::new(source.grid()?)?;
-        builder.source_header = source.afni_header()?;
+        builder.metadata = volume_metadata(source)?;
+        if let Some(axis) = &builder.metadata.time_axis {
+            builder.time_step_seconds = axis.tr_seconds().filter(|step| *step > 0.0);
+            builder.time_start_seconds = Some(axis.origin);
+        }
         Ok(builder)
     }
 
@@ -874,12 +1687,37 @@ impl VolumeBuilder {
     /// Retain a template AFNI header's private attributes. Structural and
     /// per-frame fields are regenerated from this builder when written.
     pub fn source_header(mut self, header: Header) -> Self {
-        self.source_header = Some(header);
+        self.metadata.time_axis = header.time_axis();
+        self.metadata.afni_header = Some(header);
         self
     }
 
-    /// Validate the frames and metadata and build a file-neutral envelope.
-    pub fn build(self) -> Result<VolumeEnvelope> {
+    /// Retain the complete source-only metadata envelope. This is useful when
+    /// a command reads frames lazily and builds a replacement dataset without
+    /// materialising the source [`Volume`].
+    pub fn metadata(mut self, metadata: VolumeMetadata) -> Self {
+        if self.time_step_seconds.is_none() {
+            if let Some(axis) = &metadata.time_axis {
+                self.time_step_seconds = axis.tr_seconds().filter(|step| *step > 0.0);
+                self.time_start_seconds = Some(axis.origin);
+            }
+        }
+        self.metadata = metadata;
+        self
+    }
+
+    /// Attach a detailed time axis, including optional slice timing. The core
+    /// dataset receives its TR and start time; the remaining fields stay in
+    /// [`VolumeMetadata`] for lossless AFNI/NIfTI output.
+    pub fn time_axis(mut self, axis: TimeAxis) -> Self {
+        self.time_step_seconds = axis.tr_seconds().filter(|step| *step > 0.0);
+        self.time_start_seconds = Some(axis.origin);
+        self.metadata.time_axis = Some(axis);
+        self
+    }
+
+    /// Validate the frames and metadata and build a fully loaded volume dataset.
+    pub fn build(self) -> Result<VolumeDataset> {
         if self.frames.is_empty() {
             return Err(Error::invalid("a volume output needs at least one frame"));
         }
@@ -930,7 +1768,8 @@ impl VolumeBuilder {
             })
             .collect::<Result<Vec<_>>>()?;
         let id = self
-            .source_header
+            .metadata
+            .afni_header
             .as_ref()
             .and_then(|header| domain_id(header.idcode()));
         let domain = Domain::Volume(
@@ -950,26 +1789,155 @@ impl VolumeBuilder {
             .with_time_start_seconds(self.time_start_seconds)
             .map_err(core_err)?;
 
-        let mut source_header = self.source_header;
+        let mut metadata = self.metadata;
+        if let Some(axis) = metadata.time_axis.as_mut() {
+            axis.nt = frame_count;
+            if let Some(step) = self.time_step_seconds {
+                axis.step = step;
+            }
+            if let Some(start) = self.time_start_seconds {
+                axis.origin = start;
+            }
+        }
         if let Some(history) = self.history {
-            source_header
+            metadata
+                .afni_header
                 .get_or_insert_with(Header::default)
                 .set_history(history);
         }
-        Ok(VolumeEnvelope {
-            dataset,
-            source_header,
-        })
+        Ok(VolumeDataset { dataset, metadata })
     }
 }
 
-impl VolumeEnvelope {
+impl VolumeDataset {
+    /// Read all selected frames from an AFNI or NIfTI dataset.
+    ///
+    /// A terminal AFNI-style sub-brick selector is honored for either format.
+    /// This eagerly materializes the selected values as `f32` columns. Use
+    /// [`VolumeReader`] directly when processing should remain frame-at-a-time.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        VolumeReader::open(path)?.into_dataset()
+    }
+
+    /// Read all selected frames with explicit malformed-metadata policies.
+    ///
+    /// The returned warnings correspond to metadata skipped according to
+    /// `options`; voxel and structural errors remain fatal.
+    pub fn open_with(
+        path: impl AsRef<Path>,
+        options: &AdaptOptions,
+    ) -> Result<(Self, Vec<AdaptWarning>)> {
+        let volume = VolumeReader::open(path)?.into_volume()?;
+        volume_to_dataset_with(&volume, options)
+    }
+
+    /// Convert an already loaded raw-format volume into the program-facing
+    /// dataset representation.
+    pub fn from_volume(volume: &Volume) -> Result<Self> {
+        volume_to_dataset(volume)
+    }
+
     /// Wrap a core dataset that did not come from a file.
     pub fn from_core(dataset: Dataset) -> Self {
         Self {
             dataset,
-            source_header: None,
+            metadata: VolumeMetadata::default(),
         }
+    }
+
+    /// Attach a newly computed core dataset to this volume's source metadata.
+    ///
+    /// This is the I/O counterpart to [`Dataset::derive`]: `afni-core`
+    /// calculates and describes the result, then this method carries forward
+    /// the source grid context, history, private attributes, slice information,
+    /// and NIfTI extensions needed for output. Per-frame labels, statistics,
+    /// curves, dimensions, datatype, scaling, timing, and other structural
+    /// fields are rebuilt from `result` when it is written.
+    ///
+    /// A derived file must remain dense and on exactly the source spatial grid.
+    /// Use a resampling operation before this method when the intended result
+    /// has a different grid.
+    pub fn derive(&self, result: Dataset) -> Result<Self> {
+        if result.is_sparse() {
+            return Err(Error::unsupported(
+                "a sparse derived volume must be made dense before volume output",
+            ));
+        }
+        let source_grid = dataset_grid(&self.dataset, "source")?;
+        let result_grid = dataset_grid(&result, "derived result")?;
+        source_grid
+            .compatibility(&result_grid, 0.0)
+            .require_compatible()?;
+        Ok(Self {
+            dataset: result,
+            metadata: self.metadata.clone(),
+        })
+    }
+
+    /// Append one processing entry to the retained AFNI history.
+    ///
+    /// The source history is preserved. AFNI output stores the resulting
+    /// `HISTORY_NOTE` in its header; NIfTI output stores it in the regenerated
+    /// AFNI extension.
+    pub fn with_history(mut self, entry: impl AsRef<str>) -> Self {
+        self.append_history(entry);
+        self
+    }
+
+    /// Append one processing entry to the retained AFNI history in place.
+    pub fn append_history(&mut self, entry: impl AsRef<str>) {
+        self.metadata
+            .afni_header
+            .get_or_insert_with(Header::default)
+            .append_history(entry);
+    }
+
+    /// The format-neutral dataset containing the loaded voxel columns.
+    pub fn dataset(&self) -> &Dataset {
+        &self.dataset
+    }
+
+    /// Mutable access to the format-neutral dataset.
+    ///
+    /// `Dataset` maintains its own invariants, so edits should still use its
+    /// checked replacement and transformation methods.
+    pub fn dataset_mut(&mut self) -> &mut Dataset {
+        &mut self.dataset
+    }
+
+    /// Consume this value and return its core dataset and retained metadata.
+    pub fn into_parts(self) -> (Dataset, VolumeMetadata) {
+        (self.dataset, self.metadata)
+    }
+
+    /// Source-only metadata retained alongside the core dataset.
+    pub fn metadata(&self) -> &VolumeMetadata {
+        &self.metadata
+    }
+
+    /// Mutable source-only metadata for commands that intentionally edit it.
+    pub fn metadata_mut(&mut self) -> &mut VolumeMetadata {
+        &mut self.metadata
+    }
+
+    /// Detailed output time axis, with the core dataset's current frame count,
+    /// TR, and start time overlaid on any retained slice-timing template.
+    fn output_time_axis(&self) -> Option<TimeAxis> {
+        let step = self.dataset.time_step_seconds()?;
+        let mut axis = self.metadata.time_axis.clone().unwrap_or(TimeAxis {
+            nt: self.dataset.columns().len(),
+            origin: self.dataset.time_start_seconds().unwrap_or(0.0),
+            step,
+            duration: 0.0,
+            stored_units: TimeUnits::Seconds,
+            slice_offsets: Vec::new(),
+            slice_z_origin: 0.0,
+            slice_dz: 0.0,
+        });
+        axis.nt = self.dataset.columns().len();
+        axis.step = step;
+        axis.origin = self.dataset.time_start_seconds().unwrap_or(axis.origin);
+        Some(axis)
     }
 
     /// Convert the core volume back into an AFNI HEAD/BRIK dataset.
@@ -1016,21 +1984,12 @@ impl VolumeEnvelope {
             labels.push(column.label().to_owned());
         }
         builder = builder.labels(labels);
-        if let Some(step) = self.dataset.time_step_seconds() {
-            builder = builder.time_axis(TimeAxis {
-                nt: self.dataset.columns().len(),
-                origin: self.dataset.time_start_seconds().unwrap_or(0.0),
-                step,
-                duration: 0.0,
-                stored_units: TimeUnits::Seconds,
-                slice_offsets: Vec::new(),
-                slice_z_origin: 0.0,
-                slice_dz: 0.0,
-            });
+        if let Some(axis) = self.output_time_axis() {
+            builder = builder.time_axis(axis);
         }
         let mut brik = builder.build()?;
 
-        if let Some(source) = &self.source_header {
+        if let Some(source) = &self.metadata.afni_header {
             let generated = brik.header.clone();
             let mut header = source.clone();
             // Values, statistics, labels, curves and timing describe the old
@@ -1155,6 +2114,20 @@ impl VolumeEnvelope {
                 })
             });
         let (cal_min, cal_max) = finite_range.unwrap_or((0.0, 0.0));
+        let source_nifti = self
+            .metadata
+            .nifti
+            .as_ref()
+            .map(|metadata| &metadata.header);
+        let same_slice_grid = source_nifti.is_some_and(|header| {
+            header.dim[1].max(0) as usize == dimensions[0]
+                && header.dim[2].max(0) as usize == dimensions[1]
+                && header.dim[3].max(0) as usize == dimensions[2]
+        });
+        let source_space_units = source_nifti
+            .map(|header| header.xyzt_units & 0x07)
+            .filter(|units| *units != 0)
+            .unwrap_or(2);
         let mut header = NiftiHeader {
             version,
             little_endian: true,
@@ -1165,23 +2138,40 @@ impl VolumeEnvelope {
             intent_code: 0,
             datatype: DataType::Float32.code(),
             bitpix: i32::from(DataType::Float32.bitpix()),
-            slice_start: 0,
+            slice_start: source_nifti
+                .filter(|_| same_slice_grid)
+                .map_or(0, |header| header.slice_start),
             pixdim,
             vox_offset: 0,
             scl_slope: 0.0,
             scl_inter: 0.0,
-            slice_end: dimensions[2].saturating_sub(1) as i64,
-            slice_code: 0,
+            slice_end: source_nifti
+                .filter(|_| same_slice_grid)
+                .map_or(dimensions[2].saturating_sub(1) as i64, |header| {
+                    header.slice_end
+                }),
+            slice_code: source_nifti
+                .filter(|_| same_slice_grid)
+                .map_or(0, |header| header.slice_code),
             // NIFTI_UNITS_MM, plus NIFTI_UNITS_SEC for a true time axis.
-            xyzt_units: if time_step.is_some() { 2 | 8 } else { 2 },
+            xyzt_units: source_space_units | if time_step.is_some() { 8 } else { 0 },
             cal_max: f64::from(cal_max),
             cal_min: f64::from(cal_min),
-            slice_duration: 0.0,
+            slice_duration: source_nifti
+                .filter(|_| same_slice_grid)
+                .map_or(0.0, |header| {
+                    header.slice_duration * nifti_seconds_per_time_unit(header)
+                }),
             toffset: time_step
                 .and(self.dataset.time_start_seconds())
                 .unwrap_or(0.0),
-            descrip: "written by afni-io".into(),
-            aux_file: String::new(),
+            descrip: source_nifti
+                .map(|header| header.descrip.clone())
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "written by afni-io".into()),
+            aux_file: source_nifti
+                .map(|header| header.aux_file.clone())
+                .unwrap_or_default(),
             qform_code: 0,
             sform_code: 1,
             quatern_b: 0.0,
@@ -1194,7 +2184,9 @@ impl VolumeEnvelope {
             srow_y: ras[1],
             srow_z: ras[2],
             intent_name: String::new(),
-            dim_info: 0,
+            dim_info: source_nifti
+                .filter(|_| same_slice_grid)
+                .map_or(0, |header| header.dim_info),
             magic: match version {
                 NiftiVersion::Nifti1 => "n+1".into(),
                 NiftiVersion::Nifti2 => "n+2".into(),
@@ -1217,9 +2209,22 @@ impl VolumeEnvelope {
             }
         }
 
+        let extensions = self
+            .metadata
+            .nifti
+            .as_ref()
+            .map(|metadata| {
+                metadata
+                    .extensions
+                    .iter()
+                    .filter(|extension| extension.code != ECODE_AFNI)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut nifti = Nifti {
             header,
-            extensions: Vec::new(),
+            extensions,
             data: TypedArray::Float32(values),
         };
         nifti.set_afni_header(&brik.header);
@@ -1277,13 +2282,154 @@ impl VolumeEnvelope {
     }
 }
 
-/// Convert a volume into a core dataset while retaining its AFNI header for a
-/// later round trip.
-pub fn volume_to_envelope(vol: &Volume) -> Result<VolumeEnvelope> {
-    Ok(VolumeEnvelope {
-        dataset: volume_to_core(vol)?,
-        source_header: vol.afni_header()?,
+fn dataset_grid(dataset: &Dataset, description: &str) -> Result<GridSpec> {
+    let Domain::Volume(domain) = dataset.domain() else {
+        return Err(Error::invalid(format!(
+            "{description} is not a volume-domain dataset"
+        )));
+    };
+    let affine = domain.affine().copied().ok_or_else(|| {
+        Error::missing(format!(
+            "{description} volume domain has no voxel-to-world affine"
+        ))
+    })?;
+    Ok(GridSpec {
+        dimensions: domain.dims(),
+        ijk_to_ras: affine,
     })
+}
+
+/// Translate NIfTI's compact timing fields into the richer AFNI time-axis
+/// representation. Arbitrary NIfTI fields are still retained verbatim in
+/// [`NiftiMetadata`]; this translation is what makes a pure NIfTI time series
+/// usable by `afni-core` and by AFNI output.
+fn nifti_seconds_per_time_unit(header: &NiftiHeader) -> f64 {
+    match header.xyzt_units & 0x38 {
+        16 => 1.0e-3,
+        24 => 1.0e-6,
+        _ => 1.0,
+    }
+}
+
+fn nifti_time_axis(header: &NiftiHeader) -> Option<TimeAxis> {
+    let time_code = header.xyzt_units & 0x38;
+    let stored_units = match time_code {
+        16 => TimeUnits::Milliseconds,
+        32 => TimeUnits::Hertz,
+        _ => TimeUnits::Seconds,
+    };
+    let seconds_per_unit = nifti_seconds_per_time_unit(header);
+    let nt = header.dim[4..]
+        .iter()
+        .map(|dimension| (*dimension).max(1) as usize)
+        .product::<usize>()
+        .max(1);
+    let step = header.pixdim[4].abs() * seconds_per_unit;
+
+    let nz = header.dim[3].max(1) as usize;
+    let first = header.slice_start.max(0) as usize;
+    let last = (header.slice_end.max(0) as usize).min(nz.saturating_sub(1));
+    let slice_dim = (header.dim_info >> 4) & 0x03;
+    let count = last.saturating_sub(first) + 1;
+    let mut acquisition_order = Vec::new();
+    if header.slice_code != 0 && header.slice_duration > 0.0 && matches!(slice_dim, 0 | 3) {
+        match header.slice_code {
+            1 => acquisition_order.extend(first..=last),
+            2 => acquisition_order.extend((first..=last).rev()),
+            3 => {
+                acquisition_order.extend((first..=last).step_by(2));
+                acquisition_order.extend(((first + 1)..=last).step_by(2));
+            }
+            4 => {
+                acquisition_order.extend((first..=last).rev().step_by(2));
+                acquisition_order.extend((first..last).rev().step_by(2));
+            }
+            5 => {
+                acquisition_order.extend(((first + 1)..=last).step_by(2));
+                acquisition_order.extend((first..=last).step_by(2));
+            }
+            6 => {
+                acquisition_order.extend((first..last).rev().step_by(2));
+                acquisition_order.extend((first..=last).rev().step_by(2));
+            }
+            _ => {}
+        }
+    }
+    acquisition_order.truncate(count);
+    let mut slice_offsets = if acquisition_order.is_empty() {
+        Vec::new()
+    } else {
+        vec![0.0; nz]
+    };
+    let slice_duration = header.slice_duration * seconds_per_unit;
+    for (rank, slice) in acquisition_order.into_iter().enumerate() {
+        slice_offsets[slice] = rank as f64 * slice_duration;
+    }
+
+    if nt == 1 && step == 0.0 && slice_offsets.is_empty() {
+        return None;
+    }
+    let dicom = dicom_to_ras(&header.affine());
+    Some(TimeAxis {
+        nt,
+        origin: header.toffset * seconds_per_unit,
+        step,
+        duration: slice_duration * count.saturating_sub(1) as f64,
+        stored_units,
+        slice_offsets,
+        slice_z_origin: dicom[2][3],
+        slice_dz: dicom[2][2],
+    })
+}
+
+/// Extract all metadata that does not fit completely in an `afni-core`
+/// dataset. This does not copy voxel values.
+pub fn volume_metadata(vol: &Volume) -> Result<VolumeMetadata> {
+    let afni_header = vol.afni_header()?;
+    let nifti = match vol {
+        Volume::Nifti(nifti) => Some(NiftiMetadata {
+            header: nifti.header.clone(),
+            extensions: nifti.extensions.clone(),
+        }),
+        Volume::Afni(_) => None,
+    };
+    let time_axis = afni_header
+        .as_ref()
+        .and_then(Header::time_axis)
+        .or_else(|| {
+            nifti
+                .as_ref()
+                .and_then(|metadata| nifti_time_axis(&metadata.header))
+        });
+    Ok(VolumeMetadata {
+        afni_header,
+        time_axis,
+        nifti,
+    })
+}
+
+/// Convert a loaded raw-format volume into a [`VolumeDataset`].
+///
+/// Detailed timing, source AFNI attributes, the NIfTI header template, and
+/// arbitrary NIfTI extensions are retained for a later round trip.
+pub fn volume_to_dataset(vol: &Volume) -> Result<VolumeDataset> {
+    volume_to_dataset_with(vol, &AdaptOptions::default()).map(|(dataset, _)| dataset)
+}
+
+/// Like [`volume_to_dataset`], with explicit malformed-metadata policies and
+/// any resulting warnings.
+pub fn volume_to_dataset_with(
+    vol: &Volume,
+    options: &AdaptOptions,
+) -> Result<(VolumeDataset, Vec<AdaptWarning>)> {
+    let metadata = volume_metadata(vol)?;
+    let (dataset, warnings) = volume_to_core_with(vol, options)?;
+    Ok((VolumeDataset { dataset, metadata }, warnings))
+}
+
+/// Compatibility spelling for [`volume_to_dataset`].
+pub fn volume_to_envelope(vol: &Volume) -> Result<VolumeEnvelope> {
+    volume_to_dataset(vol)
 }
 
 /// Convert every sub-brick of a volume into a dense core dataset on a
@@ -1371,7 +2517,13 @@ pub fn volume_to_core_with(
         );
     }
 
-    let time = header.as_ref().and_then(|h| h.time_axis());
+    let time = header
+        .as_ref()
+        .and_then(Header::time_axis)
+        .or_else(|| match vol {
+            Volume::Nifti(nifti) => nifti_time_axis(&nifti.header),
+            Volume::Afni(_) => None,
+        });
     let kind = match (&time, table.is_some()) {
         (_, true) => DatasetKind::Label,
         (Some(_), _) if vol.nvols() > 1 => DatasetKind::TimeSeries,

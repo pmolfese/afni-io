@@ -7,6 +7,7 @@
 //!
 //! | Module | Format | Typical extensions |
 //! |--------|--------|--------------------|
+//! | [`aff12`] | AFNI spatial affine transforms | `.aff12.1D` |
 //! | [`niml`] | NIML element trees (ASCII and binary) | `.niml`, `.niml.asc` |
 //! | [`dset`] | Surface datasets (`AFNI_dataset`) | `.niml.dset` |
 //! | [`roi`]  | Drawn surface ROIs (`Node_ROI`) | `.niml.roi` |
@@ -17,6 +18,7 @@
 //! | [`volume`] | AFNI or NIfTI volumes through one API | any of the above |
 //! | [`spec`] | SUMA surface spec files | `.spec` |
 //! | [`surface`] | FreeSurfer/SUMA ASCII surfaces | `.asc` |
+//! | [`surface_dataset`] | Unified NIML/GIfTI surface datasets | `.niml.dset`, `.gii.dset`, `*.gii` |
 //! | [`freesurfer`] | FreeSurfer binary triangle surfaces | `lh.white`, `rh.pial`, … |
 //! | [`stc`] | MNE source estimates | `.stc` |
 //! | [`gifti`] | GIfTI surface/data XML | `.gii`, `.gii.gz`, `.gii.dset` |
@@ -33,10 +35,11 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use afni_io::dset::NimlDataset;
+//! use afni_io::surface_dataset::SurfaceDatasetReader;
 //!
-//! let dset = NimlDataset::read("lh.thickness.niml.dset")?;
-//! println!("{} nodes x {} columns", dset.rows(), dset.column_count());
+//! let reader = SurfaceDatasetReader::open("lh.thickness.niml.dset")?;
+//! let dset = reader.dataset();
+//! println!("{} stored nodes x {} columns", dset.row_count(), dset.columns().len());
 //! # Ok::<(), afni_io::Error>(())
 //! ```
 //!
@@ -47,6 +50,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod adapt;
+pub mod aff12;
 pub mod array;
 mod base64;
 pub mod brik;
@@ -68,6 +72,7 @@ pub mod spec;
 pub mod stat;
 pub mod stc;
 pub mod surface;
+pub mod surface_dataset;
 #[cfg(feature = "talk")]
 pub mod talk;
 pub mod tract;
@@ -79,7 +84,12 @@ pub use error::{Error, Result};
 /// Re-exports of the most commonly used types.
 pub mod prelude {
     pub use crate::adapt::{
-        VolumeBuilder, VolumeEnvelope, VolumeOutputFormat, VolumeWriteOptions, WrittenVolume,
+        NiftiMetadata, VolumeBuilder, VolumeDataset, VolumeEnvelope, VolumeFrameWriter,
+        VolumeMetadata, VolumeOutputFormat, VolumeWriteOptions, VolumeWriteSpec, WrittenVolume,
+    };
+    pub use crate::aff12::{
+        read_aff12_series, read_aff12_transform, write_aff12_series, write_aff12_transform,
+        Aff12File,
     };
     pub use crate::array::{DataType, TypedArray};
     pub use crate::brik::{
@@ -92,7 +102,9 @@ pub mod prelude {
     pub use crate::gifti::{DataArray, Gifti};
     pub use crate::head::{Attribute, AttributeValue, Header};
     pub use crate::labels::{LabelEntry, LabelTable};
-    pub use crate::nifti::{Nifti, NiftiHeader, NiftiReader, NiftiVersion, NiftiWriteOptions};
+    pub use crate::nifti::{
+        Nifti, NiftiExtension, NiftiHeader, NiftiReader, NiftiVersion, NiftiWriteOptions,
+    };
     pub use crate::niml::{NimlData, NimlElement, NimlValue, NimlValueType};
     pub use crate::onedee::OneD;
     pub use crate::roi::{BrushAction, NodeRoi, RoiDatum, RoiDrawingType, RoiElementType, Side};
@@ -100,8 +112,12 @@ pub mod prelude {
     pub use crate::spec::{Spec, SpecSurface};
     pub use crate::stat::{StatKind, StatSpec, ThresholdCurve};
     pub use crate::surface::Surface;
+    pub use crate::surface_dataset::{
+        SurfaceDatasetFormat, SurfaceDatasetReadOptions, SurfaceDatasetReader,
+    };
     pub use crate::volume::{
         read_any, read_any_volumes, GridCompatibility, GridSpec, Volume, VolumeFormat,
-        VolumeFrames, VolumeMask, VolumeReader,
+        VolumeFrames, VolumeMask, VolumeReader, DEFAULT_GRID_TOLERANCE,
     };
+    pub use afni_core::affine::{AffineTransform, AffineTransformSeries, CoordinateConvention};
 }

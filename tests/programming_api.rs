@@ -4,6 +4,9 @@ mod common;
 
 use std::path::PathBuf;
 
+use afni_core::domain::DomainId;
+use afni_core::numeric::NonFinitePolicy;
+use afni_core::processing::{summarize_time_series, TimeSeriesStatistic};
 use afni_io::adapt::volume_to_envelope;
 use afni_io::geometry::{TimeAxis, TimeUnits};
 use afni_io::prelude::*;
@@ -110,6 +113,34 @@ fn masks_are_grid_checked() {
 }
 
 #[test]
+fn grids_and_masks_bridge_directly_to_core_types() {
+    let loaded = VolumeDataset::open(common::data("volume/u8+orig.HEAD")).unwrap();
+    let grid = GridSpec::try_from(loaded.dataset().domain()).unwrap();
+    let domain = grid
+        .to_domain(Some(DomainId::new("grid-id").unwrap()))
+        .unwrap();
+    assert_eq!(GridSpec::try_from(&domain).unwrap(), grid);
+
+    let ijk = [1.25, 2.0, 3.5];
+    let world = grid.ijk_to_world(ijk).unwrap();
+    let back = grid.world_to_ijk(world).unwrap();
+    for (actual, expected) in back.into_iter().zip(ijk) {
+        assert!((actual - expected).abs() < 1.0e-10);
+    }
+    let index = grid.linear_index(2, 2, 3).unwrap();
+    assert_eq!(grid.ijk(index).unwrap(), [2, 2, 3]);
+
+    let mask = VolumeMask::read(common::data("volume/u8+orig.HEAD")).unwrap();
+    let core_mask = mask.for_dataset(loaded.dataset()).unwrap();
+    assert_eq!(core_mask.domain(), loaded.dataset().domain());
+    assert_eq!(core_mask.count(), mask.count());
+    assert_eq!(VolumeMask::try_from(&core_mask).unwrap(), mask);
+
+    let mismatched = VolumeDataset::open(common::data("volume/lpi+orig.HEAD")).unwrap();
+    assert!(mask.for_dataset(mismatched.dataset()).is_err());
+}
+
+#[test]
 fn mutation_validates_lengths_and_labels() {
     let mut brik = BrikBuilder::cardinal(
         [2, 1, 1],
@@ -193,6 +224,62 @@ fn volume_envelope_round_trips_values_metadata_and_storage_policy() {
         );
         assert_eq!(output.sub_brick(p).unwrap().brik_type(), BrikType::Float);
     }
+}
+
+#[test]
+fn derived_volume_retains_grid_and_history_but_rebuilds_frame_metadata() {
+    let source = VolumeDataset::open(common::data("volume/timeseries+orig.HEAD")).unwrap();
+    let summary = summarize_time_series(
+        source.dataset(),
+        None,
+        [TimeSeriesStatistic::Mean.output("mean", 0.0).unwrap()],
+        NonFinitePolicy::Skip,
+    )
+    .unwrap();
+    let derived = source
+        .derive(summary)
+        .unwrap()
+        .with_history("3dRustMean -input timeseries+orig");
+
+    assert_eq!(derived.dataset().columns().len(), 1);
+    assert_eq!(derived.dataset().columns()[0].label(), "mean");
+    assert_eq!(derived.dataset().time_step_seconds(), None);
+    assert_eq!(derived.dataset().domain(), source.dataset().domain());
+    assert!(derived
+        .metadata()
+        .afni_header
+        .as_ref()
+        .unwrap()
+        .history()
+        .unwrap()
+        .contains("3dRustMean -input timeseries+orig"));
+
+    let directory = scratch("derived_volume");
+    let output_path = directory.join("mean+orig");
+    derived.write(&output_path).unwrap();
+    let output = read_any(&output_path).unwrap();
+    assert_eq!(output.dimensions(), [4, 5, 6]);
+    assert_eq!(output.nvols(), 1);
+    assert_eq!(output.labels().unwrap(), ["mean"]);
+    assert_eq!(output.stats().unwrap(), [None]);
+    let output_header = output.afni_header().unwrap().unwrap();
+    assert!(output_header.time_axis().is_none());
+    assert!(output_header
+        .history()
+        .unwrap()
+        .contains("3dRustMean -input timeseries+orig"));
+    assert_ne!(
+        output_header.idcode(),
+        source.metadata().afni_header.as_ref().unwrap().idcode()
+    );
+    std::fs::remove_dir_all(directory).ok();
+}
+
+#[test]
+fn derived_volume_rejects_a_different_grid() {
+    let source = VolumeDataset::open(common::data("volume/u8+orig.HEAD")).unwrap();
+    let other = VolumeDataset::open(common::data("volume/lpi+orig.HEAD")).unwrap();
+    assert!(source.derive(other.dataset).is_err());
 }
 
 #[test]
@@ -403,5 +490,206 @@ fn volume_builder_constructs_the_same_new_dataset_for_both_formats() {
         .labels(["too", "many"])
         .build()
         .is_err());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn volume_metadata_preserves_slice_timing_and_private_nifti_extensions() {
+    let grid = GridSpec {
+        dimensions: [1, 1, 3],
+        ijk_to_ras: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, -2.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
+    let envelope = VolumeBuilder::new(grid)
+        .unwrap()
+        .values(vec![1.0, 2.0, 3.0])
+        .unwrap()
+        .values(vec![4.0, 5.0, 6.0])
+        .unwrap()
+        .time_axis_seconds(2.0, -0.5)
+        .build()
+        .unwrap();
+    let mut source = envelope.to_nifti(NiftiVersion::Nifti1).unwrap();
+    source.header.dim_info = 3 << 4;
+    source.header.slice_start = 0;
+    source.header.slice_end = 2;
+    source.header.slice_code = 3;
+    source.header.xyzt_units = 2 | 16;
+    source.header.pixdim[4] = 2000.0;
+    source.header.toffset = -500.0;
+    source.header.slice_duration = 250.0;
+    source.extensions.push(NiftiExtension {
+        code: 44,
+        data: b"private!".to_vec(),
+    });
+    // Exercise a standards-only NIfTI source: timing must not depend on an
+    // AFNI extension being present.
+    source.extensions.retain(|extension| extension.code != 4);
+
+    let loaded = Volume::Nifti(Box::new(source));
+    let retained = volume_to_envelope(&loaded).unwrap();
+    assert_eq!(retained.dataset.time_step_seconds(), Some(2.0));
+    assert_eq!(
+        retained
+            .metadata()
+            .time_axis
+            .as_ref()
+            .unwrap()
+            .slice_offsets,
+        [0.0, 0.5, 0.25]
+    );
+    assert_eq!(
+        retained.metadata().nifti.as_ref().unwrap().extensions[0].code,
+        44
+    );
+    let output = retained.to_nifti(NiftiVersion::Nifti2).unwrap();
+    assert_eq!(output.header.slice_code, 3);
+    assert_eq!(output.header.slice_duration, 0.25);
+    assert_eq!(output.header.xyzt_units, 2 | 8);
+    assert_eq!(output.header.dim_info, 3 << 4);
+    assert_eq!(
+        output
+            .extensions
+            .iter()
+            .find(|extension| extension.code == 44)
+            .unwrap()
+            .data,
+        b"private!"
+    );
+}
+
+#[test]
+fn detailed_afni_time_axis_survives_builder_and_format_conversion() {
+    let axis = TimeAxis {
+        nt: 2,
+        origin: -0.125,
+        step: 1.5,
+        duration: 0.5,
+        stored_units: TimeUnits::Seconds,
+        slice_offsets: vec![0.0, 0.25, 0.125],
+        slice_z_origin: -2.0,
+        slice_dz: 2.0,
+    };
+    let grid = GridSpec {
+        dimensions: [1, 1, 3],
+        ijk_to_ras: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, -2.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
+    let envelope = VolumeBuilder::new(grid)
+        .unwrap()
+        .values(vec![1.0; 3])
+        .unwrap()
+        .values(vec![2.0; 3])
+        .unwrap()
+        .time_axis(axis.clone())
+        .build()
+        .unwrap();
+    assert_eq!(
+        envelope
+            .to_brik(StoragePolicy::Float)
+            .unwrap()
+            .header
+            .time_axis()
+            .unwrap(),
+        axis
+    );
+    assert_eq!(
+        envelope
+            .to_nifti(NiftiVersion::Nifti1)
+            .unwrap()
+            .afni_header()
+            .unwrap()
+            .unwrap()
+            .time_axis()
+            .unwrap(),
+        axis
+    );
+}
+
+#[test]
+fn frame_writer_streams_afni_and_nifti_and_cleans_up_incomplete_output() {
+    let dir = scratch("frame_writer");
+    let grid = GridSpec {
+        dimensions: [2, 1, 1],
+        ijk_to_ras: [
+            [2.0, 0.0, 0.0, -1.0],
+            [0.0, 2.0, 0.0, 1.0],
+            [0.0, 0.0, 2.0, 3.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
+    let axis = TimeAxis {
+        nt: 2,
+        origin: 0.0,
+        step: 0.8,
+        duration: 0.0,
+        stored_units: TimeUnits::Seconds,
+        slice_offsets: Vec::new(),
+        slice_z_origin: 0.0,
+        slice_dz: 0.0,
+    };
+    let spec = VolumeWriteSpec::new(grid.clone(), 2)
+        .unwrap()
+        .labels(["first", "second"])
+        .time_axis(axis);
+    let frames = [[-3.0, 4.0], [5.0, 9.0]];
+
+    let afni_path = dir.join("streamed+orig.BRIK.gz");
+    let mut afni_writer = VolumeFrameWriter::create(
+        &afni_path,
+        spec.clone(),
+        VolumeWriteOptions {
+            afni_storage: StoragePolicy::AutoShort,
+            history_entry: Some("streaming AFNI test".into()),
+            ..VolumeWriteOptions::default()
+        },
+    )
+    .unwrap();
+    for frame in &frames {
+        afni_writer.write_frame(frame).unwrap();
+    }
+    assert_eq!(afni_writer.frames_written(), 2);
+    afni_writer.finish().unwrap();
+    let afni = read_any(&afni_path).unwrap();
+    assert_eq!(afni.labels().unwrap(), ["first", "second"]);
+    for (index, expected) in frames.iter().enumerate() {
+        for (actual, expected) in afni.frame(index).unwrap().iter().zip(expected) {
+            assert!((actual - expected).abs() < 0.001);
+        }
+    }
+
+    let nifti_path = dir.join("streamed.nii.gz");
+    let mut nifti_writer =
+        VolumeFrameWriter::create(&nifti_path, spec.clone(), VolumeWriteOptions::default())
+            .unwrap();
+    for frame in &frames {
+        nifti_writer.write_frame(frame).unwrap();
+    }
+    nifti_writer.finish().unwrap();
+    let nifti = read_any(&nifti_path).unwrap();
+    assert_eq!(nifti.frame(0).unwrap(), frames[0]);
+    assert_eq!(nifti.frame(1).unwrap(), frames[1]);
+
+    let incomplete_path = dir.join("incomplete.nii");
+    let mut incomplete =
+        VolumeFrameWriter::create(&incomplete_path, spec, VolumeWriteOptions::default()).unwrap();
+    incomplete.write_frame(&frames[0]).unwrap();
+    assert!(incomplete.finish().is_err());
+    assert!(!incomplete_path.exists());
+    assert!(std::fs::read_dir(&dir).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".afni-io-")
+    }));
     std::fs::remove_dir_all(dir).ok();
 }
