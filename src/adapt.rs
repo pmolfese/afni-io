@@ -21,8 +21,10 @@
 //
 // HOW IT RELATES TO THE REST OF THE CRATE
 //
-// * This is the ONLY module that knows about both worlds. The dependency
-//   points `afni-io -> afni-core`; `afni-core` never sees NIML/HEAD syntax.
+// * This is the general dataset bridge between both worlds. Typed format
+//   wrappers such as `aff12` and `xmat` also contain core values, but the
+//   dependency still points `afni-io -> afni-core`; `afni-core` never sees
+//   NIML/HEAD/1D syntax.
 // * Raw types (`NimlDataset`, `Header`, ...) keep every attribute so files
 //   round-trip. A core `Dataset` keeps only what it understands. Anything it
 //   does not understand travels in `NimlExtras`, bundled with the core dataset

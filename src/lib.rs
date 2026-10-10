@@ -24,6 +24,7 @@
 //! | [`gifti`] | GIfTI surface/data XML | `.gii`, `.gii.gz`, `.gii.dset` |
 //! | [`nifti`] | NIfTI-1/2 volumes | `.nii`, `.nii.gz`, `.hdr`/`.img` |
 //! | [`onedee`] | AFNI numeric text tables | `.1D` |
+//! | [`xmat`] | AFNI regression design matrices | `X.xmat.1D`, `X.mat.1D` |
 //! | `talk` | AFNI ⇄ SUMA talk protocol encoding (feature `talk`) | (TCP, no files) |
 //! | [`adapt`] | Adapters into `afni-core` datasets and label tables | (any of the above) |
 //!
@@ -77,6 +78,7 @@ pub mod surface_dataset;
 pub mod talk;
 pub mod tract;
 pub mod volume;
+pub mod xmat;
 mod xml;
 
 pub use error::{Error, Result};
@@ -119,5 +121,7 @@ pub mod prelude {
         read_any, read_any_volumes, GridCompatibility, GridSpec, Volume, VolumeFormat,
         VolumeFrames, VolumeMask, VolumeReader, DEFAULT_GRID_TOLERANCE,
     };
+    pub use crate::xmat::{XmatAttribute, XmatExtras, XmatFile};
     pub use afni_core::affine::{AffineTransform, AffineTransformSeries, CoordinateConvention};
+    pub use afni_core::design::{DesignMatrix, Regressor, RegressorRole, Stimulus};
 }

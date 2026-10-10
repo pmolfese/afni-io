@@ -156,8 +156,29 @@ fn inspect(path: &Path) -> Result<()> {
             print_sub_bricks(&afni);
         }
     } else if name.ends_with(".1d") {
-        let one = OneD::read(path)?;
-        println!("1D  {} rows x {} cols", one.rows, one.cols);
+        let text = std::fs::read_to_string(path)?;
+        if XmatFile::looks_like(&text) {
+            let xmat = XmatFile::parse(&text)?;
+            println!(
+                "X-matrix  {} retained / {} full observations x {} regressors",
+                xmat.core.observation_count(),
+                xmat.core.full_observation_count(),
+                xmat.core.regressor_count()
+            );
+            println!("  runs: {}", xmat.core.run_starts().len());
+            println!("  censored: {}", xmat.core.is_censored());
+            for (column, regressor) in xmat.core.regressors().iter().enumerate() {
+                println!(
+                    "  col {column}: {}  {:?}  group {:?}",
+                    regressor.label(),
+                    regressor.role(),
+                    regressor.group()
+                );
+            }
+        } else {
+            let one = OneD::parse(&text)?;
+            println!("1D  {} rows x {} cols", one.rows, one.cols);
+        }
     } else if name.ends_with(".niml") || name.ends_with(".niml.asc") {
         let elements = afni_io::niml::read(path)?;
         println!("niml  {} top-level element(s)", elements.len());

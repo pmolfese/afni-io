@@ -28,6 +28,7 @@ code); the only dependencies are
 | `nifti` | NIfTI-1 / NIfTI-2 volumes, with header extensions (incl. AFNI's) | `.nii`, `.nii.gz`, `.hdr`/`.img` | ✅ | ✅ |
 | `volume` | Either of the above through one API (`read_any`) | any of the above | ✅ | — |
 | `onedee` | Numeric text tables | `.1D` | ✅ | ✅ |
+| `xmat` | Regression design matrices with timing, censor, run, and regressor metadata | `X.xmat.1D`, `X.mat.1D` | ✅ | ✅ |
 | `talk` | AFNI ⇄ SUMA talk protocol encoding: port numbers, framing, `SUMA_ixyz`/`SUMA_ijk`/crosshair/`SUMA_irgba` elements (feature `talk`, no sockets) | TCP | ✅ | ✅ |
 | `freesurfer` | FreeSurfer binary triangle surfaces | `lh.white`, `rh.pial`, … | ✅ | ✅ |
 | `stc` | MNE source estimates (time series on vertices) | `.stc` | ✅ | ✅ |
@@ -433,6 +434,12 @@ attributes core cannot express travel in a `RoiEnvelope`, so writing back is los
 networks and tracts (pass the original file as the template to keep its history, links and
 grid datasets). `AFNI_IO_LIVE=1 cargo test` also hands the graphs we write back to `ConvertDset`. `StatKind` and
 `StatSpec` are defined in `afni-core` and re-exported from `afni_io::stat`.
+
+`XmatFile` follows the same boundary for `X.xmat.1D`: `afni-io` recognizes and
+round-trips the comment-wrapped AFNI header, while
+`afni_core::design::DesignMatrix` owns regressor roles, the retained-to-full
+observation map, run boundaries, timing, and stimulus ranges. Unknown header
+attributes and the generating command line remain in `XmatExtras`.
 
 The two crates are separate repositories. `Cargo.toml` fetches `afni-core` from
 GitHub (tracking `main` for now; it will move to tagged releases), so a fresh
