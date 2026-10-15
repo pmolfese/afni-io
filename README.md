@@ -9,6 +9,14 @@ code); the only dependencies are
 [`thiserror`](https://crates.io/crates/thiserror) and
 [`flate2`](https://crates.io/crates/flate2) (gzip, pure-Rust backend).
 
+If you know AFNI's C API, use the
+[`afni-io` to AFNI/SUMA C API crosswalk](docs/AFNI_C_API_CROSSWALK.md) to find
+the Rust operation corresponding to `THD_*`, `DSET_*`, `NI_*`, and `SUMA_*`
+names. It also records naming questions to settle before 1.0.
+The cross-crate audit of covered and missing AFNI `thd_*.[ch]` operations lives
+in
+[`afni-core/docs/THD_LIBRARY_COVERAGE.md`](https://github.com/pmolfese/afni-core/blob/main/docs/THD_LIBRARY_COVERAGE.md).
+
 ## Supported formats
 
 | Module | Format | Extensions | Read | Write |
@@ -331,6 +339,11 @@ source
 ```
 
 `VolumeDataset::open` is therefore the convenient default for most programs.
+For slice-timed series, `VolumeDataset::slice_time_correct` connects the stored
+`TimeAxis` to `afni-core`'s AFNI-compatible Fourier, polynomial, or
+weighted-sinc correction. It returns a new volume, clears the consumed
+per-slice offsets, and records the resolved common acquisition time as the
+output time origin.
 Use `VolumeReader` when the algorithm can operate frame-by-frame and should not
 hold every frame in memory. Calling `VolumeReader::into_dataset` explicitly
 crosses from that lazy interface to the fully loaded representation.

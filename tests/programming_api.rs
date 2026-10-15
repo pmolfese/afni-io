@@ -615,6 +615,62 @@ fn detailed_afni_time_axis_survives_builder_and_format_conversion() {
 }
 
 #[test]
+fn slice_time_correction_consumes_offsets_and_records_reference_time() {
+    let grid = GridSpec {
+        dimensions: [1, 1, 3],
+        ijk_to_ras: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, -2.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
+    let axis = TimeAxis {
+        nt: 10,
+        origin: 0.0,
+        step: 2.0,
+        duration: 0.0,
+        stored_units: TimeUnits::Seconds,
+        slice_offsets: vec![0.0, 0.5, 1.0],
+        slice_z_origin: -2.0,
+        slice_dz: 2.0,
+    };
+    let mut builder = VolumeBuilder::new(grid).unwrap().time_axis(axis);
+    for time in 0..10 {
+        builder = builder
+            .values(vec![
+                10.0 + (0.3 * time as f32).sin(),
+                20.0 + (0.3 * time as f32 + 0.2).sin(),
+                30.0 + (0.3 * time as f32 + 0.4).sin(),
+            ])
+            .unwrap();
+    }
+    let source = builder.build().unwrap();
+    let (corrected, report) = source
+        .slice_time_correct(SliceTimeOptions::default())
+        .unwrap();
+    assert_eq!(report.reference_seconds, 0.5);
+    assert_eq!(report.shifted_slices, 2);
+    assert_eq!(corrected.dataset().time_start_seconds(), Some(0.5));
+    let corrected_axis = corrected.metadata().time_axis.as_ref().unwrap();
+    assert_eq!(corrected_axis.origin, 0.5);
+    assert!(corrected_axis.slice_offsets.is_empty());
+    assert_eq!(corrected_axis.slice_z_origin, 0.0);
+    assert_eq!(corrected_axis.slice_dz, 0.0);
+    let nifti = corrected.to_nifti(NiftiVersion::Nifti1).unwrap();
+    assert_eq!(nifti.header.toffset, 0.5);
+    assert_eq!(nifti.header.slice_code, 0);
+    let afni_axis = corrected
+        .to_brik(StoragePolicy::Float)
+        .unwrap()
+        .header
+        .time_axis()
+        .unwrap();
+    assert_eq!(afni_axis.origin, 0.5);
+    assert!(afni_axis.slice_offsets.is_empty());
+}
+
+#[test]
 fn frame_writer_streams_afni_and_nifti_and_cleans_up_incomplete_output() {
     let dir = scratch("frame_writer");
     let grid = GridSpec {

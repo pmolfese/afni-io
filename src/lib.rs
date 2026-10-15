@@ -47,6 +47,12 @@
 //! The lowest layer, [`niml`], exposes the generic element tree that the
 //! higher-level [`dset`] and [`roi`] modules are built on, so unusual files
 //! can always be inspected element-by-element.
+//!
+//! Developers coming from AFNI/SUMA C can use the
+//! [AFNI/SUMA C API crosswalk](https://github.com/pmolfese/afni-io/blob/main/docs/AFNI_C_API_CROSSWALK.md)
+//! to translate `THD_*`, `DSET_*`, `NI_*`, and `SUMA_*` operations to this
+//! crate's API. The crosswalk distinguishes direct ports from broader C
+//! workflows and Rust-only helpers.
 
 #![warn(missing_debug_implementations)]
 
@@ -124,4 +130,7 @@ pub mod prelude {
     pub use crate::xmat::{XmatAttribute, XmatExtras, XmatFile};
     pub use afni_core::affine::{AffineTransform, AffineTransformSeries, CoordinateConvention};
     pub use afni_core::design::{DesignMatrix, Regressor, RegressorRole, Stimulus};
+    pub use afni_core::slice_timing::{
+        SliceTimeInterpolation, SliceTimeOptions, SliceTimeReference, SliceTimeReport,
+    };
 }

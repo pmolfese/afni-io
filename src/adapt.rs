@@ -55,6 +55,7 @@ use afni_core::domain::{Domain, DomainId, SurfaceDomain, VolumeDomain};
 use afni_core::labels::{LabelEntry as CoreEntry, LabelTable as CoreTable};
 use afni_core::mapping::SampleMap;
 use afni_core::roi::{Roi as CoreRoi, RoiStroke as CoreStroke};
+use afni_core::slice_timing::{slice_time_correct_dataset, SliceTimeOptions, SliceTimeReport};
 use afni_core::stat::{IntentOrigin, StatSpec};
 
 use crate::array::{DataType, TypedArray};
@@ -1920,6 +1921,32 @@ impl VolumeDataset {
     /// Mutable source-only metadata for commands that intentionally edit it.
     pub fn metadata_mut(&mut self) -> &mut VolumeMetadata {
         &mut self.metadata
+    }
+
+    /// Apply AFNI-compatible slice-time correction using this
+    /// volume's TR and per-slice offsets.
+    ///
+    /// The result retains private source metadata, clears the consumed slice
+    /// offsets, and records the resolved common acquisition time as its time
+    /// origin. The input is unchanged if validation or correction fails.
+    pub fn slice_time_correct(&self, options: SliceTimeOptions) -> Result<(Self, SliceTimeReport)> {
+        let axis = self
+            .metadata
+            .time_axis
+            .as_ref()
+            .ok_or_else(|| Error::missing("volume slice-timing metadata"))?;
+        let (dataset, report) =
+            slice_time_correct_dataset(&self.dataset, &axis.slice_offsets, options)
+                .map_err(core_err)?;
+        let mut corrected = self.derive(dataset)?;
+        let mut output_axis = axis.clone();
+        output_axis.nt = corrected.dataset.columns().len();
+        output_axis.origin = report.reference_seconds;
+        output_axis.slice_offsets.clear();
+        output_axis.slice_z_origin = 0.0;
+        output_axis.slice_dz = 0.0;
+        corrected.metadata.time_axis = Some(output_axis);
+        Ok((corrected, report))
     }
 
     /// Detailed output time axis, with the core dataset's current frame count,
