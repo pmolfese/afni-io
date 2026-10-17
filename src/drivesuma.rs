@@ -2,7 +2,7 @@
 //!
 //! It owns the target-neutral command model, exact wire representation, and
 //! reusable TCP session. User-interface prompts and process/CLI policy remain
-//! with callers such as `drivesuma-rs`.
+//! with callers such as `afni-drive` and its `suma-drive` compatibility alias.
 
 use std::collections::BTreeMap;
 use std::fmt;

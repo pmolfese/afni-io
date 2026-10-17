@@ -22,6 +22,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 | 8 | Remaining formats | ✅ |
 | 9 | AFNI talk protocol encoding | ✅ |
 | 10 | Beyond sumaru's current needs | 🚧 |
+| 11 | Shared driver languages and legacy plugout transport | ⬜ |
 | — | Moving sumaru onto afni-io (you, separately) | ⬜ see checklist |
 
 ---
@@ -132,7 +133,7 @@ What sumaru can now replace, and what to keep in sumaru's adapters:
 - [ ] NIML (after Phase 6): sumaru → afni-io names are `NimlNumericMatrix` → `NumericMatrix` (typed columns; `column_count`, `get`), `NimlMixedTable` → `MixedTable`, `NimlData::RoiDatums`/`TractDatums` → `NimlData::Records`, `parse_niml_bytes` → `niml::parse_bytes`, `serialize_niml_ascii` → `niml::serialize`, `serialize_niml_binary` → `niml::serialize_binary`, `expand_niml_type` → `niml::expand_ni_type`. The talk reader's parse-and-retry loop and `expected_binary_niml_message_len` (`afni.rs`) can become `niml::parse_stream`
 - [ ] sumaru writes ROI `Type="4"` for collections; SUMA's `Collection` is 3 (`SUMA_ROI_DRAWING_TYPE`), so SUMA gets an undefined drawing type. sumaru's cluster dsets also have no `self_idcode`
 - [ ] sumaru's NIML reader treats `ni_form="binary"` as host byte order; AFNI means big-endian (see Phase 5 log)
-- [ ] Talk protocol (Phase 9; enable `afni-io` feature `talk`): `resolve_afni_port_config` / `resolve_drivesuma_port_config` / `npb_to_np` / `port_offset_to_bloc` → `talk::Ports`, `offset_from_env`, `offset_from_bloc`; `surface_registration_elements` → `talk::surface_elements` (or `registration_bytes`, which adds the keep/pause-reading instructions); `surface_crosshair_element` → `talk::Crosshair::on_surface(..).to_element()`; `AfniRgbaOverlay` → `talk::Irgba`; `surface_crosshair_from_group` → `talk::CrosshairMessage::from_element`; `drive_afni_command_element` → `talk::drive_afni_element`; `expected_binary_niml_message_len` and the parse-and-retry loop → `talk::MessageReader`. Keep in sumaru: sockets and threads, `SurfaceMesh` → `Geometry` (vertices, normals, triangles; flip x/y with `talk::flip_xy` for GIfTI), DriveSuma parsing, routing. Behaviour to fix on the way: drop `AFNI_NIML_FIRST_PORT` (AFNI ignores it), and add the 65500 / 2686 limits (see Phase 9 log)
+- [ ] Talk protocol (Phase 9; enable `afni-io` feature `talk`): `resolve_afni_port_config` / `resolve_drivesuma_port_config` / `npb_to_np` / `port_offset_to_bloc` → `talk::Ports`, `offset_from_env`, `offset_from_bloc`; `surface_registration_elements` → `talk::surface_elements` (or `registration_bytes`, which adds the keep/pause-reading instructions); `surface_crosshair_element` → `talk::Crosshair::on_surface(..).to_element()`; `AfniRgbaOverlay` → `talk::Irgba`; `surface_crosshair_from_group` → `talk::CrosshairMessage::from_element`; `drive_afni_command_element` → `talk::drive_afni_element`; `expected_binary_niml_message_len` and the parse-and-retry loop → `talk::MessageReader`. Keep in sumaru: viewer threads, `SurfaceMesh` → `Geometry` (vertices, normals, triangles; flip x/y with `talk::flip_xy` for GIfTI), and application routing. Shared DriveSuma parsing, wire encoding, TCP client behavior, and surface transfer now live in `afni_io::drivesuma`. Behaviour to fix on the way: drop `AFNI_NIML_FIRST_PORT` (AFNI ignores it), and add the 65500 / 2686 limits (see Phase 9 log)
 - [ ] Spec, FreeSurfer, STC (Phase 8): sumaru's `io/freesurfer.rs` → `freesurfer::FreeSurferSurface` (same limits plus AFNI's; it also errors on a NaN coordinate and keeps the footer), `io/stc.rs` → `stc::Stc` (`time_points`, `tmin`/`tstep` in seconds; `to_dataset()` for the dataset). Spec reading in sumaru → `Spec::resolve`
 - [ ] Later phases: GIfTI (Phase 7, drops `gifti-rs`), dset/ROI (Phase 6)
 
@@ -191,8 +192,10 @@ Public API changes:
 
 ## Phase 9 — AFNI talk protocol encoding ✅
 
-Behind the `talk` feature (`cargo test --features talk`); `afni_io::talk` is
-pure encoding and never opens a socket. Checked against AFNI's source
+Behind the `talk` feature (`cargo test --features talk`); `afni_io::talk`
+contains the general AFNI/SUMA NIML representation while
+`afni_io::drivesuma` also provides the reusable DriveSuma TCP client. Checked
+against AFNI's source
 (`afni_ports.c`, `afni_niml.c`, `SUMA_niml.c`, `niml_elemio.c`), against
 `afni -list_ports`, and against messages AFNI itself sent.
 
@@ -203,7 +206,9 @@ pure encoding and never opens a socket. Checked against AFNI's source
 - [x] **Checked against real messages:** AFNI's `SUMA_crosshair` group and a `SUMA_irgba` (from sumaru's recording) read correctly; the `SUMA_irgba` we write parses to the identical element and has the identical body bytes
 - [ ] **Not checked against a live AFNI.** The builders follow `SUMA_niml.c` and the recording, but nothing here has been sent to a running `afni -niml`
 
-Public API (new): `afni_io::talk` (feature `talk`). Coordinates are RAI; `talk::flip_xy` converts from RAS (GIfTI). Sockets, threads, message routing and DriveSuma command parsing stay in sumaru.
+Public API (new): `afni_io::talk` and `afni_io::drivesuma` (feature `talk`).
+Coordinates are RAI; `talk::flip_xy` converts from RAS (GIfTI). Application
+threads and message routing remain with the viewer or command-line program.
 
 ## Phase 10 — Beyond sumaru's current needs 🚧
 
@@ -229,6 +234,37 @@ Public API (new): `afni_io::talk` (feature `talk`). Coordinates are RAI; `talk::
 - [ ] NIfTI complex and RGB datatypes (see the Phase 4 log); streaming / single-volume NIfTI reads
 
 ---
+
+## Phase 11 — Shared driver languages and legacy plugout transport ⬜
+
+Support the `afni-drive` command-line program and afniru's compatible receiver
+without duplicating AFNI protocol rules in either application.
+
+- [ ] Add `drive_afni`: a typed/lossless parser for AFNI's `DRIVE_AFNI`
+  vocabulary, controller/window addressing, aliases, quoted arguments, source
+  spans, stable errors, capability/risk metadata, and raw passthrough for
+  AFNI's dynamically registered plugin commands.
+- [ ] Generate command-table tests from `README.driver`, `afni_driver.c`, and
+  recorded AFNI examples. Keep parsing independent of viewer state and GUI
+  concepts.
+- [ ] Add `plugout`: reusable client and server-side state machines for the
+  legacy two-stage TCP handshake, `PONAME`/`IOCHAN` registration,
+  NUL-terminated `DRIVE_AFNI` messages, and four-byte acknowledgements.
+- [ ] Reuse `talk::Ports` for `AFNI_PLUGOUT_TCP_0`, `PLUGOUT_DRIVE_PORT`,
+  `-np`/`-npb`, and environment overrides.
+- [ ] Bound buffers, clients, retries, and timeouts; test fragmentation,
+  malformed handshakes, bad acknowledgements, reconnects, collisions, and
+  partial closes with mock peers.
+- [ ] Validate the client against AFNI and the server side against the official
+  `plugout_drive` executable.
+- [ ] Keep AFNI NIML as an alternative transport for the same parsed command
+  values through the existing `drive_afni_element` and processing instruction.
+- [ ] Evaluate Unix-only shared-memory compatibility separately. Do not let it
+  block portable TCP compatibility or silently substitute different behavior.
+
+Application execution remains outside `afni-io`: `afni-drive` owns CLI,
+routing, and process supervision; afniru translates parsed commands into its
+session actions; AFNI executes raw commands itself.
 
 ## Discovery log
 
