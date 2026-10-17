@@ -9,6 +9,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// A legacy command or option was malformed.
+    #[error("{0}")]
+    Usage(String),
+
     /// An I/O error, annotated with the path that triggered it.
     #[error("I/O error for {path}: {source}")]
     Io {

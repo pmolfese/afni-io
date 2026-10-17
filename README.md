@@ -31,13 +31,14 @@ in
 | `head` | `.HEAD` attributes only (header of the pair) | `.HEAD` | ✅ | ✅ |
 | `spec` | SUMA surface spec files, as SUMA resolves them (`Spec::resolve`) | `.spec` | ✅ | ✅ |
 | `surface` | FreeSurfer/SUMA ASCII surfaces | `.asc` | ✅ | ✅ |
+| `surface_io` | Unified SUMA mesh readers, including paired formats | GIfTI, FreeSurfer, 1D/Vec, OBJ, PLY, STL, MNI OBJ, BrainVoyager, SureFit, BYU, OpenDX, Inventor | ✅ | — |
 | `gifti` | GIfTI surface/data XML | `.gii`, `.gii.gz`, `.gii.dset` | ✅ | ✅ |
 | `surface_dataset` | NIML or GIfTI surface data through one core-facing API | `.niml.dset`, `.gii.dset`, `*.gii` | ✅ | NIML |
 | `nifti` | NIfTI-1 / NIfTI-2 volumes, with header extensions (incl. AFNI's) | `.nii`, `.nii.gz`, `.hdr`/`.img` | ✅ | ✅ |
 | `volume` | Either of the above through one API (`read_any`) | any of the above | ✅ | — |
 | `onedee` | Numeric text tables | `.1D` | ✅ | ✅ |
 | `xmat` | Regression design matrices with timing, censor, run, and regressor metadata | `X.xmat.1D`, `X.mat.1D` | ✅ | ✅ |
-| `talk` | AFNI ⇄ SUMA talk protocol encoding: port numbers, framing, `SUMA_ixyz`/`SUMA_ijk`/crosshair/`SUMA_irgba` elements (feature `talk`, no sockets) | TCP | ✅ | ✅ |
+| `talk` / `drivesuma` | AFNI ⇄ SUMA encoding plus reusable DriveSuma commands, framing, binary surfaces, and TCP session (feature `talk`) | TCP | ✅ | ✅ |
 | `freesurfer` | FreeSurfer binary triangle surfaces | `lh.white`, `rh.pial`, … | ✅ | ✅ |
 | `stc` | MNE source estimates (time series on vertices) | `.stc` | ✅ | ✅ |
 | `adapt` | Adapters into `afni-core` datasets | any of the above | ✅ | NIML only |
@@ -66,6 +67,15 @@ genuinely sparse datasets also need the surface's complete node count through
 `SurfaceDatasetReadOptions`. Reading is eager because the XML/NIML container is
 decoded as a whole. NIML inputs retain their extra attributes for lossless
 write-back, while GIfTI inputs retain the original document for inspection.
+
+**One surface-mesh API** (`surface_io::read_surface`): applications share the
+same format detection and triangulation for GIfTI, FreeSurfer ASCII/binary,
+Wavefront OBJ, ASCII/binary PLY, ASCII/binary STL, MNI OBJ, BrainVoyager SRF,
+BYU, OpenDX, and Open Inventor. Paired coordinate/topology `.1D`/Vec and
+SureFit surfaces use `surface_io::read_surface_pair`. The `talk` feature
+additionally exposes the legacy DriveSuma command parser, target-neutral command
+model, exact NIML wire codec, binary surface transfer, and TCP session in
+`drivesuma`.
 
 **NIML** (`niml`): numeric columns are stored in their declared type
 (`byte`/`short`/`int`/`float`/`double`), so a `float` dataset takes half the

@@ -18,6 +18,7 @@
 //! | [`volume`] | AFNI or NIfTI volumes through one API | any of the above |
 //! | [`spec`] | SUMA surface spec files | `.spec` |
 //! | [`surface`] | FreeSurfer/SUMA ASCII surfaces | `.asc` |
+//! | [`surface_io`] | Unified SUMA surface mesh loading | GIfTI, FreeSurfer, 1D/Vec, OBJ, PLY, STL, MNI, BV, SureFit, BYU, DX, IV |
 //! | [`surface_dataset`] | Unified NIML/GIfTI surface datasets | `.niml.dset`, `.gii.dset`, `*.gii` |
 //! | [`freesurfer`] | FreeSurfer binary triangle surfaces | `lh.white`, `rh.pial`, … |
 //! | [`stc`] | MNE source estimates | `.stc` |
@@ -25,7 +26,7 @@
 //! | [`nifti`] | NIfTI-1/2 volumes | `.nii`, `.nii.gz`, `.hdr`/`.img` |
 //! | [`onedee`] | AFNI numeric text tables | `.1D` |
 //! | [`xmat`] | AFNI regression design matrices | `X.xmat.1D`, `X.mat.1D` |
-//! | `talk` | AFNI ⇄ SUMA talk protocol encoding (feature `talk`) | (TCP, no files) |
+//! | `talk` | AFNI ⇄ SUMA and DriveSuma protocol/client support (feature `talk`) | TCP |
 //! | [`adapt`] | Adapters into `afni-core` datasets and label tables | (any of the above) |
 //!
 //! An AFNI volume is a single dataset stored as two files: a `.HEAD` of ASCII
@@ -62,6 +63,8 @@ pub mod array;
 mod base64;
 pub mod brik;
 mod compress;
+#[cfg(feature = "talk")]
+pub mod drivesuma;
 pub mod dset;
 pub mod error;
 pub mod freesurfer;
@@ -80,6 +83,7 @@ pub mod stat;
 pub mod stc;
 pub mod surface;
 pub mod surface_dataset;
+pub mod surface_io;
 #[cfg(feature = "talk")]
 pub mod talk;
 pub mod tract;
@@ -123,6 +127,7 @@ pub mod prelude {
     pub use crate::surface_dataset::{
         SurfaceDatasetFormat, SurfaceDatasetReadOptions, SurfaceDatasetReader,
     };
+    pub use crate::surface_io::{read_surface, read_surface_as, read_surface_pair, SurfaceFormat};
     pub use crate::volume::{
         read_any, read_any_volumes, GridCompatibility, GridSpec, Volume, VolumeFormat,
         VolumeFrames, VolumeMask, VolumeReader, DEFAULT_GRID_TOLERANCE,
