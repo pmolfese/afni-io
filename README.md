@@ -39,6 +39,8 @@ in
 | `onedee` | Numeric text tables | `.1D` | ✅ | ✅ |
 | `xmat` | Regression design matrices with timing, censor, run, and regressor metadata | `X.xmat.1D`, `X.mat.1D` | ✅ | ✅ |
 | `talk` / `drivesuma` | AFNI ⇄ SUMA encoding plus reusable DriveSuma commands, framing, binary surfaces, and TCP session (feature `talk`) | TCP | ✅ | ✅ |
+| `drive_afni` | Typed/lossless `DRIVE_AFNI` command language, aliases, source spans, and policy metadata (feature `talk`) | command text | ✅ | ✅ |
+| `plugout` | Legacy AFNI two-stage plugout TCP client/server transport (feature `talk`) | TCP | ✅ | ✅ |
 | `freesurfer` | FreeSurfer binary triangle surfaces | `lh.white`, `rh.pial`, … | ✅ | ✅ |
 | `stc` | MNE source estimates (time series on vertices) | `.stc` | ✅ | ✅ |
 | `adapt` | Adapters into `afni-core` datasets | any of the above | ✅ | NIML only |
@@ -75,7 +77,14 @@ BYU, OpenDX, and Open Inventor. Paired coordinate/topology `.1D`/Vec and
 SureFit surfaces use `surface_io::read_surface_pair`. The `talk` feature
 additionally exposes the legacy DriveSuma command parser, target-neutral command
 model, exact NIML wire codec, binary surface transfer, and TCP session in
-`drivesuma`.
+`drivesuma`. The `drive_afni` module parses AFNI's complete static driver table
+without losing the original text, records aliases and command risks, supports
+runtime plugin registrations, and preserves unknown commands for legacy AFNI.
+The same feature exposes the two-stage AFNI plugout transport in `plugout`:
+typed registration, official named-port selection, bounded TCP client/server
+sessions, NUL-terminated messages, and four-byte acknowledgements.
+Shared-memory plugouts are recognized but deliberately not emulated by the
+portable TCP implementation.
 
 **NIML** (`niml`): numeric columns are stored in their declared type
 (`byte`/`short`/`int`/`float`/`double`), so a `float` dataset takes half the

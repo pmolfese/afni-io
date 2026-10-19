@@ -121,6 +121,8 @@ fn ports_by_name() {
     assert_eq!(ports.get(AFNI_SUMA_NIML), Some(53211));
     assert_eq!(ports.afni_suma_niml(), 53211);
     assert_eq!(ports.drivesuma(), 53219);
+    assert_eq!(ports.plugout_control(), 7955);
+    assert_eq!(ports.plugout_drive(), 8099);
     assert_eq!(ports.get("PLUGOUT_TT_PORT"), Some(8001));
     assert_eq!(ports.get("NO_SUCH_PORT"), None);
     assert_eq!(ports.iter().count(), PORT_NAMES.len());

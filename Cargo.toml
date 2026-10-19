@@ -25,8 +25,8 @@ flate2 = "1"
 
 [features]
 default = []
-# AFNI/SUMA talk and DriveSuma support: ports, framing, surface/crosshair/
-# colour elements, DriveSuma commands, and its reusable TCP client.
+# AFNI/SUMA talk, DriveSuma, and plugout support: ports, framing,
+# surface/crosshair/colour elements, command models, and reusable TCP clients.
 talk = []
 
 [lints.rust]

@@ -22,7 +22,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 | 8 | Remaining formats | ✅ |
 | 9 | AFNI talk protocol encoding | ✅ |
 | 10 | Beyond sumaru's current needs | 🚧 |
-| 11 | Shared driver languages and legacy plugout transport | ⬜ |
+| 11 | Shared driver languages and legacy plugout transport | 🚧 |
 | — | Moving sumaru onto afni-io (you, separately) | ⬜ see checklist |
 
 ---
@@ -235,30 +235,33 @@ threads and message routing remain with the viewer or command-line program.
 
 ---
 
-## Phase 11 — Shared driver languages and legacy plugout transport ⬜
+## Phase 11 — Shared driver languages and legacy plugout transport 🚧
 
 Support the `afni-drive` command-line program and afniru's compatible receiver
 without duplicating AFNI protocol rules in either application.
 
-- [ ] Add `drive_afni`: a typed/lossless parser for AFNI's `DRIVE_AFNI`
+- [x] Add `drive_afni`: a typed/lossless parser for AFNI's `DRIVE_AFNI`
   vocabulary, controller/window addressing, aliases, quoted arguments, source
   spans, stable errors, capability/risk metadata, and raw passthrough for
   AFNI's dynamically registered plugin commands.
-- [ ] Generate command-table tests from `README.driver`, `afni_driver.c`, and
-  recorded AFNI examples. Keep parsing independent of viewer state and GUI
-  concepts.
-- [ ] Add `plugout`: reusable client and server-side state machines for the
+- [x] Check in command-table and example fixtures from `afni_driver.c` and
+  `README.driver`; keep parsing independent of viewer state and GUI concepts.
+- [ ] Add transcripts from live AFNI runs to the fixture corpus during the
+  client conformance milestone.
+- [x] Add `plugout`: reusable client and server-side state machines for the
   legacy two-stage TCP handshake, `PONAME`/`IOCHAN` registration,
   NUL-terminated `DRIVE_AFNI` messages, and four-byte acknowledgements.
-- [ ] Reuse `talk::Ports` for `AFNI_PLUGOUT_TCP_0`, `PLUGOUT_DRIVE_PORT`,
+- [x] Reuse `talk::Ports` for `AFNI_PLUGOUT_TCP_0`, `PLUGOUT_DRIVE_PORT`,
   `-np`/`-npb`, and environment overrides.
-- [ ] Bound buffers, clients, retries, and timeouts; test fragmentation,
+- [x] Bound buffers, retries, and timeouts; test fragmentation,
   malformed handshakes, bad acknowledgements, reconnects, collisions, and
   partial closes with mock peers.
+- [ ] Add an explicit concurrent-client admission limit when the server is
+  integrated into afniru's long-running listener.
 - [ ] Validate the client against AFNI and the server side against the official
   `plugout_drive` executable.
-- [ ] Keep AFNI NIML as an alternative transport for the same parsed command
-  values through the existing `drive_afni_element` and processing instruction.
+- [x] Keep AFNI NIML as an alternative transport through the existing
+  `drive_afni_element` and processing-instruction encoders.
 - [ ] Evaluate Unix-only shared-memory compatibility separately. Do not let it
   block portable TCP compatibility or silently substitute different behavior.
 
@@ -270,6 +273,26 @@ session actions; AFNI executes raw commands itself.
 
 Newest first. Record anything about AFNI, SUMA or sumaru behaviour that
 affects the design, with the phase it was found in.
+
+- **2026-10-17 · Phase 11.** `afni_driver.c` has 101 static dispatch rows but
+  only 100 unique labels because `WRITE_UNDERLAY` appears twice. Dispatch is a
+  case-sensitive prefix comparison in source order; dynamically registered
+  plugin commands are checked afterward. `INSTACORR_SET` and
+  `INSTACORR_INIT` are rewritten to the `INSTACORR` command form immediately
+  before dispatch. `afni_io::drive_afni` preserves all of those details while
+  also offering exact-token dispatch for new receivers, a documented
+  `DATASET#N` registry, source spans, aliases, risk metadata, and raw unknown
+  command preservation.
+
+- **2026-10-17 · Phase 11.** `plugout_drive.c` and `afni_plugout.c` confirm
+  that the TCP driver protocol has two connections. The client sends a
+  NUL-terminated `PONAME`/`IOCHAN` registration to `AFNI_PLUGOUT_TCP_0`;
+  AFNI binds the requested data port before returning the exact four bytes
+  `OK!\0` (or `BAD\0`), then accepts a second connection. Driver messages are
+  NUL-terminated `DRIVE_AFNI ...` strings with the same four-byte ACK. The
+  official command limit is 4095 bytes; AFNI's receive buffer is 64 KiB.
+  `afni_io::plugout` implements this TCP behavior for both sides. It parses
+  shared-memory channel specifications but rejects them explicitly.
 
 - **2026-10-03 · Phase 8.** SUMA joins the spec file's directory to a file name
   with plain concatenation (`SUMA_Read_SpecFile`), so an absolute `SurfaceName`

@@ -75,6 +75,10 @@ pub const PORT_NAMES: [&str; 24] = [
 pub const AFNI_SUMA_NIML: &str = "AFNI_SUMA_NIML";
 /// The port SUMA listens on for DriveSuma.
 pub const SUMA_DRIVESUMA_NIML: &str = "SUMA_DRIVESUMA_NIML";
+/// First control port on which AFNI accepts legacy plugout registrations.
+pub const AFNI_PLUGOUT_TCP_0: &str = "AFNI_PLUGOUT_TCP_0";
+/// Data port requested by the official `plugout_drive` client.
+pub const PLUGOUT_DRIVE_PORT: &str = "PLUGOUT_DRIVE_PORT";
 
 /// The base port used when no offset is given.
 pub const DEFAULT_PORT_OFFSET: u16 = 53211;
@@ -260,6 +264,16 @@ impl Ports {
     /// The port SUMA listens on for DriveSuma.
     pub fn drivesuma(&self) -> u16 {
         self.ports[8]
+    }
+
+    /// First control port on which AFNI accepts plugout registrations.
+    pub fn plugout_control(&self) -> u16 {
+        self.ports[9]
+    }
+
+    /// Data port used by the official `plugout_drive` client.
+    pub fn plugout_drive(&self) -> u16 {
+        self.ports[16]
     }
 
     /// Every `(name, port)` pair, in AFNI's order (as `afni -list_ports`).

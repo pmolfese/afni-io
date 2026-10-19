@@ -27,6 +27,8 @@
 //! | [`onedee`] | AFNI numeric text tables | `.1D` |
 //! | [`xmat`] | AFNI regression design matrices | `X.xmat.1D`, `X.mat.1D` |
 //! | `talk` | AFNI ⇄ SUMA and DriveSuma protocol/client support (feature `talk`) | TCP |
+//! | `drive_afni` | Typed/lossless AFNI driver command language (feature `talk`) | command text |
+//! | `plugout` | Legacy AFNI plugout TCP client/server transport (feature `talk`) | TCP |
 //! | [`adapt`] | Adapters into `afni-core` datasets and label tables | (any of the above) |
 //!
 //! An AFNI volume is a single dataset stored as two files: a `.HEAD` of ASCII
@@ -64,6 +66,8 @@ mod base64;
 pub mod brik;
 mod compress;
 #[cfg(feature = "talk")]
+pub mod drive_afni;
+#[cfg(feature = "talk")]
 pub mod drivesuma;
 pub mod dset;
 pub mod error;
@@ -76,6 +80,8 @@ pub mod labels;
 pub mod nifti;
 pub mod niml;
 pub mod onedee;
+#[cfg(feature = "talk")]
+pub mod plugout;
 pub mod roi;
 pub mod selector;
 pub mod spec;
